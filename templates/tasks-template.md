@@ -99,9 +99,22 @@ Task: "Integration test auth in tests/integration/test_auth.py"
    1. `git add` any files you modified, created or removed.
    2. `pre-commit`
       - Make fixes, and repeat these steps until exit code 0 before you mark the task as done.
-- Commit the changes with a conventional commit message.
+   3. Mark the task as complete: `specify task complete T001 -m "Brief description of what was completed"`
+   4. Commit the changes with a conventional commit message.
 - Never stage `specs/`, `.specify/`, or `.claude/`.
 - Avoid: vague tasks, same file conflicts
+
+## Task Management Commands
+
+Use the Specify CLI to track task completion:
+
+- `specify task status` - Show progress summary and all tasks
+- `specify task list` - List all tasks, use `--incomplete` for incomplete only
+- `specify task complete T001` - Mark task T001 as complete
+- `specify task complete T001 -m "Added user model"` - Mark complete with description
+- `specify task uncomplete T001` - Mark task T001 as incomplete (undo completion)
+
+The CLI automatically updates the checkboxes in this tasks.md file and adds timestamps.
 
 ## Task Generation Rules
 *Applied during main() execution*

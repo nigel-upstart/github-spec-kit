@@ -44,6 +44,9 @@ from rich.table import Table
 from rich.tree import Tree
 from typer.core import TyperGroup
 
+# Task tracking imports
+from .task_tracker import TaskParser, find_tasks_file
+
 # For cross-platform keyboard input
 import readchar
 import ssl
@@ -999,6 +1002,165 @@ def check():
         console.print("[dim]Tip: Install git for repository management[/dim]")
     if not (claude_ok or gemini_ok):
         console.print("[dim]Tip: Install an AI assistant for the best experience[/dim]")
+
+
+# Task management commands
+task_app = typer.Typer(help="Manage tasks in the current feature's tasks.md file")
+app.add_typer(task_app, name="task")
+
+
+@task_app.command("complete")
+def task_complete(
+    task_id: str = typer.Argument(..., help="Task ID to mark complete (e.g., T001)"),
+    message: str = typer.Option(None, "--message", "-m", help="Optional commit message describing what was completed")
+):
+    """Mark a task as complete in the tasks.md file."""
+
+    # Find the tasks.md file for current feature branch
+    tasks_file = find_tasks_file()
+    if not tasks_file:
+        console.print("[red]Error:[/red] No tasks.md found for current feature branch")
+        console.print("[dim]Make sure you're on a feature branch (001-feature-name) and have run /tasks[/dim]")
+        raise typer.Exit(1)
+
+    parser = TaskParser(tasks_file)
+    task = parser.get_task(task_id)
+
+    if not task:
+        console.print(f"[red]Error:[/red] Task '{task_id}' not found in {tasks_file.name}")
+        console.print("\n[dim]Available tasks:[/dim]")
+        for t in parser.get_all_tasks():
+            status = "✓" if t.completed else "○"
+            parallel = "[P]" if t.parallel else ""
+            console.print(f"  {status} {t.task_id} {parallel} {t.description[:60]}...")
+        raise typer.Exit(1)
+
+    if task.completed:
+        console.print(f"[yellow]Task {task_id} is already completed[/yellow]")
+        return
+
+    # Mark as complete
+    success = parser.mark_complete(task_id, message)
+    if success:
+        console.print(f"[green]✓[/green] Marked {task_id} as complete: [dim]{task.description}[/dim]")
+
+        # Show progress summary
+        summary = parser.get_progress_summary()
+        console.print(f"[dim]Progress: {summary['completed']}/{summary['total']} tasks ({summary['progress_pct']}%)[/dim]")
+
+        # Suggest git commit if message provided
+        if message:
+            console.print(f"\n[dim]Consider committing with:[/dim] git commit -m \"{message}\"")
+    else:
+        console.print(f"[red]Error:[/red] Failed to mark {task_id} as complete")
+        raise typer.Exit(1)
+
+
+@task_app.command("status")
+def task_status():
+    """Show status of all tasks in the current feature."""
+
+    tasks_file = find_tasks_file()
+    if not tasks_file:
+        console.print("[red]Error:[/red] No tasks.md found for current feature branch")
+        console.print("[dim]Make sure you're on a feature branch (001-feature-name) and have run /tasks[/dim]")
+        raise typer.Exit(1)
+
+    parser = TaskParser(tasks_file)
+    all_tasks = parser.get_all_tasks()
+
+    if not all_tasks:
+        console.print(f"[yellow]No tasks found in {tasks_file.name}[/yellow]")
+        return
+
+    # Show progress summary
+    summary = parser.get_progress_summary()
+    console.print(f"\n[bold]Task Progress:[/bold] {summary['completed']}/{summary['total']} ({summary['progress_pct']}%)")
+    console.print(f"[dim]File: {tasks_file}[/dim]\n")
+
+    # Group tasks by status
+    incomplete = parser.get_incomplete_tasks()
+    completed = parser.get_completed_tasks()
+
+    if incomplete:
+        console.print("[bold]Incomplete Tasks:[/bold]")
+        for task in incomplete:
+            parallel = "[cyan][P][/cyan]" if task.parallel else ""
+            console.print(f"  [red]○[/red] {task.task_id} {parallel} {task.description}")
+        console.print()
+
+    if completed:
+        console.print("[bold]Completed Tasks:[/bold]")
+        for task in completed:
+            parallel = "[cyan][P][/cyan]" if task.parallel else ""
+            console.print(f"  [green]✓[/green] {task.task_id} {parallel} {task.description}")
+
+
+@task_app.command("list")
+def task_list(
+    incomplete_only: bool = typer.Option(False, "--incomplete", "-i", help="Show only incomplete tasks")
+):
+    """List all tasks in the current feature."""
+
+    tasks_file = find_tasks_file()
+    if not tasks_file:
+        console.print("[red]Error:[/red] No tasks.md found for current feature branch")
+        console.print("[dim]Make sure you're on a feature branch (001-feature-name) and have run /tasks[/dim]")
+        raise typer.Exit(1)
+
+    parser = TaskParser(tasks_file)
+
+    if incomplete_only:
+        tasks_to_show = parser.get_incomplete_tasks()
+        console.print(f"\n[bold]Incomplete Tasks ({len(tasks_to_show)}):[/bold]")
+    else:
+        tasks_to_show = parser.get_all_tasks()
+        summary = parser.get_progress_summary()
+        console.print(f"\n[bold]All Tasks ({summary['completed']}/{summary['total']}):[/bold]")
+
+    if not tasks_to_show:
+        console.print("[dim]No tasks to show[/dim]")
+        return
+
+    console.print(f"[dim]File: {tasks_file}[/dim]\n")
+
+    for task in tasks_to_show:
+        status = "[green]✓[/green]" if task.completed else "[red]○[/red]"
+        parallel = "[cyan][P][/cyan]" if task.parallel else ""
+        console.print(f"  {status} {task.task_id} {parallel} {task.description}")
+
+
+@task_app.command("uncomplete")
+def task_uncomplete(
+    task_id: str = typer.Argument(..., help="Task ID to mark incomplete (e.g., T001)")
+):
+    """Mark a task as incomplete in the tasks.md file."""
+
+    tasks_file = find_tasks_file()
+    if not tasks_file:
+        console.print("[red]Error:[/red] No tasks.md found for current feature branch")
+        raise typer.Exit(1)
+
+    parser = TaskParser(tasks_file)
+    task = parser.get_task(task_id)
+
+    if not task:
+        console.print(f"[red]Error:[/red] Task '{task_id}' not found")
+        raise typer.Exit(1)
+
+    if not task.completed:
+        console.print(f"[yellow]Task {task_id} is already incomplete[/yellow]")
+        return
+
+    success = parser.mark_incomplete(task_id)
+    if success:
+        console.print(f"[green]○[/green] Marked {task_id} as incomplete: [dim]{task.description}[/dim]")
+
+        summary = parser.get_progress_summary()
+        console.print(f"[dim]Progress: {summary['completed']}/{summary['total']} tasks ({summary['progress_pct']}%)[/dim]")
+    else:
+        console.print(f"[red]Error:[/red] Failed to mark {task_id} as incomplete")
+        raise typer.Exit(1)
 
 
 def main():
