@@ -49,6 +49,12 @@ scripts:
 **Constraints**: [domain-specific, e.g., <200ms p95, <100MB memory, offline-capable or NEEDS CLARIFICATION]  
 **Scale/Scope**: [domain-specific, e.g., 10k users, 1M LOC, 50 screens or NEEDS CLARIFICATION]
 
+## Rule Packs Applied
+*Populate before Phase 0. If none exist, state "None discovered".*
+
+- [.cursor/rules/...mdc]: [Key directives + how they impact architecture/tests/tooling]
+- [...]
+
 ## Constitution Check
 *GATE: Must pass before Phase 0 research. Re-check after Phase 1 design.*
 
@@ -135,6 +141,11 @@ ios/ or android/
 **Structure Decision**: [DEFAULT to Option 1 unless Technical Context indicates web/mobile app]
 
 ## Phase 0: Outline & Research
+0. **Gather applicable rule packs**:
+   - Determine keywords from Technical Context (languages, frameworks, build tools, file types).
+   - Starting from the feature directory and walking up to the repository root, collect `.cursor/rules/**/*.mdc` files.
+   - Include rule files whose filenames, directory names, or declared globs mention the detected keywords or file extensions to be created.
+   - Summarize each applicable rule in "Rule Packs Applied" and translate mandatory directives into constraints for Architecture, Testing, and later phases of this plan.
 1. **Extract unknowns from Technical Context** above:
    - For each NEEDS CLARIFICATION → research task
    - For each dependency → best practices task

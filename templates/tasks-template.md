@@ -94,7 +94,13 @@ Task: "Integration test auth in tests/integration/test_auth.py"
 ## Notes
 - [P] tasks = different files, no dependencies
 - Verify tests fail before implementing
-- Commit after each task
+- Before starting work on a task, review applicable `.cursor/rules/**/*.mdc` files (walk from the feature directory up to the repository root) whose filenames or declared globs match the languages, frameworks, or file extensions listed in plan.md, and apply their directives.
+- When you believe you have completed a task do the following:
+   1. `git add` any files you modified, created or removed.
+   2. `pre-commit`
+      - Make fixes, and repeat these steps until exit code 0 before you mark the task as done.
+- Commit the changes with a conventional commit message.
+- Never stage `specs/`, `.specify/`, or `.claude/`.
 - Avoid: vague tasks, same file conflicts
 
 ## Task Generation Rules
@@ -103,11 +109,11 @@ Task: "Integration test auth in tests/integration/test_auth.py"
 1. **From Contracts**:
    - Each contract file → contract test task [P]
    - Each endpoint → implementation task
-   
+
 2. **From Data Model**:
    - Each entity → model creation task [P]
    - Relationships → service layer tasks
-   
+
 3. **From User Stories**:
    - Each story → integration test [P]
    - Quickstart scenarios → validation tasks
