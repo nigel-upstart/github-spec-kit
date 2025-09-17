@@ -30,28 +30,27 @@ import sys
 import zipfile
 import tempfile
 import shutil
-import json
 import re
 from pathlib import Path
-from typing import Optional, Tuple, List, Dict
+from typing import Optional, Tuple, List, Dict, Any, Union, Callable
 from datetime import datetime
 
-import typer
-import httpx
-from rich.console import Console
-from rich.panel import Panel
-from rich.progress import Progress, SpinnerColumn, TextColumn
-from rich.text import Text
-from rich.live import Live
-from rich.align import Align
-from rich.table import Table
-from rich.tree import Tree
-from typer.core import TyperGroup
+import typer  # type: ignore[import-not-found]
+import httpx  # type: ignore[import-not-found]
+from rich.console import Console  # type: ignore[import-not-found]
+from rich.panel import Panel  # type: ignore[import-not-found]
+from rich.progress import Progress, SpinnerColumn, TextColumn  # type: ignore[import-not-found]
+from rich.text import Text  # type: ignore[import-not-found]
+from rich.live import Live  # type: ignore[import-not-found]
+from rich.align import Align  # type: ignore[import-not-found]
+from rich.table import Table  # type: ignore[import-not-found]
+from rich.tree import Tree  # type: ignore[import-not-found]
+from typer.core import TyperGroup  # type: ignore[import-not-found]
 
 # For cross-platform keyboard input
-import readchar
+import readchar  # type: ignore[import-not-found]
 import ssl
-import truststore
+import truststore  # type: ignore[import-not-found]
 
 ssl_context = truststore.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
 client = httpx.Client(verify=ssl_context)
@@ -85,7 +84,7 @@ TAGLINE = "Spec-Driven Development Toolkit"
 class TaskEntry:
     """Represents a single task entry from tasks.md."""
 
-    def __init__(self, task_id: str, description: str, completed: bool = False, parallel: bool = False, line_number: int = 0):
+    def __init__(self, task_id: str, description: str, completed: bool = False, parallel: bool = False, line_number: int = 0) -> None:
         self.task_id = task_id
         self.description = description
         self.completed = completed
@@ -93,7 +92,7 @@ class TaskEntry:
         self.line_number = line_number
         self.original_line = ""
 
-    def __repr__(self):
+    def __repr__(self) -> str:
         return f"TaskEntry(id={self.task_id}, completed={self.completed}, desc='{self.description[:50]}...')"
 
 
@@ -103,7 +102,7 @@ class TaskParser:
     # Regex to match task lines like: - [ ] T001 [P] Description
     TASK_PATTERN = re.compile(r'^- \[([x ])\] (T\d{3})(\s*\[P\])?\s*(.+)$', re.IGNORECASE)
 
-    def __init__(self, tasks_file: Path):
+    def __init__(self, tasks_file: Path) -> None:
         self.tasks_file = tasks_file
         self.tasks: Dict[str, TaskEntry] = {}
         self.file_lines: List[str] = []
@@ -151,7 +150,7 @@ class TaskParser:
         """Get all completed tasks."""
         return [task for task in self.tasks.values() if task.completed]
 
-    def mark_complete(self, task_id: str, commit_message: str = None) -> bool:
+    def mark_complete(self, task_id: str, commit_message: Optional[str] = None) -> bool:
         """Mark a task as complete and update the file."""
         task = self.get_task(task_id)
         if not task:
@@ -207,7 +206,7 @@ class TaskParser:
 
         return True
 
-    def get_progress_summary(self) -> Dict[str, int]:
+    def get_progress_summary(self) -> Dict[str, Union[int, float]]:
         """Get a summary of task progress."""
         total = len(self.tasks)
         completed = len(self.get_completed_tasks())
@@ -221,7 +220,7 @@ class TaskParser:
         }
 
 
-def find_tasks_file(start_path: Path = None) -> Optional[Path]:
+def find_tasks_file(start_path: Optional[Path] = None) -> Optional[Path]:
     """Find the tasks.md file for the current feature branch."""
     if start_path is None:
         start_path = Path.cwd()
@@ -264,33 +263,33 @@ def find_tasks_file(start_path: Path = None) -> Optional[Path]:
 class StepTracker:
     """Track and render hierarchical steps without emojis, similar to Claude Code tree output."""
 
-    def __init__(self, title: str):
+    def __init__(self, title: str) -> None:
         self.title = title
-        self.steps = []  # list of dicts: {key, label, status, detail}
+        self.steps: List[Dict[str, str]] = []  # list of dicts: {key, label, status, detail}
         self.status_order = {"pending": 0, "running": 1, "done": 2, "error": 3, "skipped": 4}
-        self._refresh_cb = None  # callable to trigger UI refresh
+        self._refresh_cb: Optional[Callable[[], None]] = None  # callable to trigger UI refresh
 
-    def attach_refresh(self, cb):
+    def attach_refresh(self, cb: Callable[[], None]) -> None:
         self._refresh_cb = cb
 
-    def add(self, key: str, label: str):
+    def add(self, key: str, label: str) -> None:
         if key not in [s["key"] for s in self.steps]:
             self.steps.append({"key": key, "label": label, "status": "pending", "detail": ""})
             self._maybe_refresh()
 
-    def start(self, key: str, detail: str = ""):
+    def start(self, key: str, detail: str = "") -> None:
         self._update(key, status="running", detail=detail)
 
-    def complete(self, key: str, detail: str = ""):
+    def complete(self, key: str, detail: str = "") -> None:
         self._update(key, status="done", detail=detail)
 
-    def error(self, key: str, detail: str = ""):
+    def error(self, key: str, detail: str = "") -> None:
         self._update(key, status="error", detail=detail)
 
-    def skip(self, key: str, detail: str = ""):
+    def skip(self, key: str, detail: str = "") -> None:
         self._update(key, status="skipped", detail=detail)
 
-    def _update(self, key: str, status: str, detail: str):
+    def _update(self, key: str, status: str, detail: str) -> None:
         for s in self.steps:
             if s["key"] == key:
                 s["status"] = status
@@ -302,14 +301,14 @@ class StepTracker:
         self.steps.append({"key": key, "label": key, "status": status, "detail": detail})
         self._maybe_refresh()
 
-    def _maybe_refresh(self):
+    def _maybe_refresh(self) -> None:
         if self._refresh_cb:
             try:
                 self._refresh_cb()
             except Exception:
                 pass
 
-    def render(self):
+    def render(self) -> Tree:
         tree = Tree(f"[bold cyan]{self.title}[/bold cyan]", guide_style="grey50")
         for step in self.steps:
             label = step["label"]
@@ -344,7 +343,7 @@ class StepTracker:
         return tree
 
 
-def get_key():
+def get_key() -> str:
     """Get a single keypress in a cross-platform way using readchar."""
     key = readchar.readkey()
 
@@ -366,10 +365,10 @@ def get_key():
     if key == readchar.key.CTRL_C:
         raise KeyboardInterrupt
 
-    return key
+    return str(key)
 
 
-def select_with_arrows(options: dict, prompt_text: str = "Select an option", default_key: str = None) -> str:
+def select_with_arrows(options: Dict[str, str], prompt_text: str = "Select an option", default_key: Optional[str] = None) -> str:
     """Interactive selection using arrow keys with Rich Live display."""
     option_keys = list(options.keys())
     if default_key and default_key in option_keys:
@@ -377,9 +376,9 @@ def select_with_arrows(options: dict, prompt_text: str = "Select an option", def
     else:
         selected_index = 0
 
-    selected_key = None
+    selected_key: Optional[str] = None
 
-    def create_selection_panel():
+    def create_selection_panel() -> Panel:
         """Create the selection panel with current selection highlighted."""
         table = Table.grid(padding=(0, 2))
         table.add_column(style="bright_cyan", justify="left", width=3)
@@ -403,7 +402,7 @@ def select_with_arrows(options: dict, prompt_text: str = "Select an option", def
 
     console.print()
 
-    def run_selection_loop():
+    def run_selection_loop() -> None:
         nonlocal selected_key, selected_index
         with Live(create_selection_panel(), console=console, transient=True, auto_refresh=False) as live:
             while True:
@@ -438,10 +437,10 @@ def select_with_arrows(options: dict, prompt_text: str = "Select an option", def
 console = Console()
 
 
-class BannerGroup(TyperGroup):
+class BannerGroup(TyperGroup):  # type: ignore[misc]
     """Custom group that shows banner before help."""
 
-    def format_help(self, ctx, formatter):
+    def format_help(self, ctx: Any, formatter: Any) -> None:
         show_banner()
         super().format_help(ctx, formatter)
 
@@ -455,7 +454,7 @@ app = typer.Typer(
 )
 
 
-def show_banner():
+def show_banner() -> None:
     """Display the ASCII art banner."""
     banner_lines = BANNER.strip().split('\n')
     colors = ["bright_blue", "blue", "cyan", "bright_cyan", "white", "bright_white"]
@@ -470,8 +469,8 @@ def show_banner():
     console.print()
 
 
-@app.callback()
-def callback(ctx: typer.Context):
+@app.callback()  # type: ignore[misc]
+def callback(ctx: typer.Context) -> None:
     """Show banner when no subcommand is provided."""
     if ctx.invoked_subcommand is None and "--help" not in sys.argv and "-h" not in sys.argv:
         show_banner()
@@ -479,7 +478,7 @@ def callback(ctx: typer.Context):
         console.print()
 
 
-def run_command(cmd: list[str], check_return: bool = True, capture: bool = False, shell: bool = False) -> Optional[str]:
+def run_command(cmd: List[str], check_return: bool = True, capture: bool = False, shell: bool = False) -> Optional[str]:
     """Run a shell command and optionally capture output."""
     try:
         if capture:
@@ -526,7 +525,7 @@ def check_tool(tool: str, install_hint: str) -> bool:
         return False
 
 
-def is_git_repo(path: Path = None) -> bool:
+def is_git_repo(path: Optional[Path] = None) -> bool:
     """Check if the specified path is inside a git repository."""
     if path is None:
         path = Path.cwd()
@@ -548,8 +547,8 @@ def is_git_repo(path: Path = None) -> bool:
 
 def init_git_repo(project_path: Path, quiet: bool = False) -> bool:
     """Initialize a git repository in the specified path."""
+    original_cwd = Path.cwd()
     try:
-        original_cwd = Path.cwd()
         os.chdir(project_path)
         if not quiet:
             console.print("[cyan]Initializing git repository...[/cyan]")
@@ -568,7 +567,7 @@ def init_git_repo(project_path: Path, quiet: bool = False) -> bool:
         os.chdir(original_cwd)
 
 
-def download_template_from_github(ai_assistant: str, download_dir: Path, *, script_type: str = "sh", verbose: bool = True, show_progress: bool = True, client: httpx.Client = None, debug: bool = False) -> Tuple[Path, dict]:
+def download_template_from_github(ai_assistant: str, download_dir: Path, *, script_type: str = "sh", verbose: bool = True, show_progress: bool = True, client: Optional[httpx.Client] = None, debug: bool = False) -> Tuple[Path, Dict[str, Any]]:
     repo_owner = "github"
     repo_name = "spec-kit"
     if client is None:
@@ -591,7 +590,7 @@ def download_template_from_github(ai_assistant: str, download_dir: Path, *, scri
         except ValueError as je:
             raise RuntimeError(f"Failed to parse release JSON: {je}\nRaw (truncated 400): {response.text[:400]}")
     except Exception as e:
-        console.print(f"[red]Error fetching release information[/red]")
+        console.print("[red]Error fetching release information[/red]")
         console.print(Panel(str(e), title="Fetch Error", border_style="red"))
         raise typer.Exit(1)
 
@@ -621,7 +620,7 @@ def download_template_from_github(ai_assistant: str, download_dir: Path, *, scri
     # Download the file
     zip_path = download_dir / filename
     if verbose:
-        console.print(f"[cyan]Downloading template...[/cyan]")
+        console.print("[cyan]Downloading template...[/cyan]")
 
     try:
         with client.stream("GET", download_url, timeout=60, follow_redirects=True) as response:
@@ -651,7 +650,7 @@ def download_template_from_github(ai_assistant: str, download_dir: Path, *, scri
                         for chunk in response.iter_bytes(chunk_size=8192):
                             f.write(chunk)
     except Exception as e:
-        console.print(f"[red]Error downloading template[/red]")
+        console.print("[red]Error downloading template[/red]")
         detail = str(e)
         if zip_path.exists():
             zip_path.unlink()
@@ -668,7 +667,7 @@ def download_template_from_github(ai_assistant: str, download_dir: Path, *, scri
     return zip_path, metadata
 
 
-def download_and_extract_template(project_path: Path, ai_assistant: str, script_type: str, is_current_dir: bool = False, *, verbose: bool = True, tracker: StepTracker = None, client: httpx.Client = None, debug: bool = False) -> Path:
+def download_and_extract_template(project_path: Path, ai_assistant: str, script_type: str, is_current_dir: bool = False, *, verbose: bool = True, tracker: Optional[StepTracker] = None, client: Optional[httpx.Client] = None, debug: bool = False) -> Path:
     """Download the latest release and extract it to create a new project."""
     current_dir = Path.cwd()
 
@@ -733,7 +732,7 @@ def download_and_extract_template(project_path: Path, ai_assistant: str, script_
                             tracker.add("flatten", "Flatten nested directory")
                             tracker.complete("flatten")
                         elif verbose:
-                            console.print(f"[cyan]Found nested directory structure[/cyan]")
+                            console.print("[cyan]Found nested directory structure[/cyan]")
 
                     for item in source_dir.iterdir():
                         dest_path = project_path / item.name
@@ -754,7 +753,7 @@ def download_and_extract_template(project_path: Path, ai_assistant: str, script_
                                 console.print(f"[yellow]Overwriting file:[/yellow] {item.name}")
                             shutil.copy2(item, dest_path)
                     if verbose and not tracker:
-                        console.print(f"[cyan]Template files merged into current directory[/cyan]")
+                        console.print("[cyan]Template files merged into current directory[/cyan]")
             else:
                 zip_ref.extractall(project_path)
 
@@ -777,7 +776,7 @@ def download_and_extract_template(project_path: Path, ai_assistant: str, script_
                         tracker.add("flatten", "Flatten nested directory")
                         tracker.complete("flatten")
                     elif verbose:
-                        console.print(f"[cyan]Flattened nested directory structure[/cyan]")
+                        console.print("[cyan]Flattened nested directory structure[/cyan]")
 
     except Exception as e:
         if tracker:
@@ -806,14 +805,14 @@ def download_and_extract_template(project_path: Path, ai_assistant: str, script_
     return project_path
 
 
-def ensure_executable_scripts(project_path: Path, tracker: StepTracker = None) -> None:
+def ensure_executable_scripts(project_path: Path, tracker: Optional[StepTracker] = None) -> None:
     """Ensure POSIX .sh scripts under .specify/scripts (recursively) have execute bits (no-op on Windows)."""
     if os.name == "nt":
         return  # Windows: skip silently
     scripts_root = project_path / ".specify" / "scripts"
     if not scripts_root.is_dir():
         return
-    failures: list[str] = []
+    failures: List[str] = []
     updated = 0
     for script in scripts_root.rglob("*.sh"):
         try:
@@ -821,17 +820,22 @@ def ensure_executable_scripts(project_path: Path, tracker: StepTracker = None) -
                 continue
             try:
                 with script.open("rb") as f:
-                    if f.read(2) != b"#!":
+                    first_bytes = f.read(2)
+                    if first_bytes != b"#!":
                         continue
             except Exception:
                 continue
-            st = script.stat(); mode = st.st_mode
+            st = script.stat()
+            mode = st.st_mode
             if mode & 0o111:
                 continue
             new_mode = mode
-            if mode & 0o400: new_mode |= 0o100
-            if mode & 0o040: new_mode |= 0o010
-            if mode & 0o004: new_mode |= 0o001
+            if mode & 0o400:
+                new_mode |= 0o100
+            if mode & 0o040:
+                new_mode |= 0o010
+            if mode & 0o004:
+                new_mode |= 0o001
             if not (new_mode & 0o100):
                 new_mode |= 0o100
             os.chmod(script, new_mode)
@@ -847,23 +851,23 @@ def ensure_executable_scripts(project_path: Path, tracker: StepTracker = None) -
             console.print(f"[cyan]Updated execute permissions on {updated} script(s) recursively[/cyan]")
         if failures:
             console.print("[yellow]Some scripts could not be updated:[/yellow]")
-            for f in failures:
-                console.print(f"  - {f}")
+            for failure in failures:
+                console.print(f"  - {failure}")
 
 
 # ===== CLI COMMANDS =====
 
-@app.command()
+@app.command()  # type: ignore[misc]
 def init(
-    project_name: str = typer.Argument(None, help="Name for your new project directory (optional if using --here)"),
-    ai_assistant: str = typer.Option(None, "--ai", help="AI assistant to use: claude, gemini, copilot, or cursor"),
-    script_type: str = typer.Option(None, "--script", help="Script type to use: sh or ps"),
+    project_name: Optional[str] = typer.Argument(None, help="Name for your new project directory (optional if using --here)"),
+    ai_assistant: Optional[str] = typer.Option(None, "--ai", help="AI assistant to use: claude, gemini, copilot, or cursor"),
+    script_type: Optional[str] = typer.Option(None, "--script", help="Script type to use: sh or ps"),
     ignore_agent_tools: bool = typer.Option(False, "--ignore-agent-tools", help="Skip checks for AI agent tools like Claude Code"),
     no_git: bool = typer.Option(False, "--no-git", help="Skip git repository initialization"),
     here: bool = typer.Option(False, "--here", help="Initialize project in the current directory instead of creating a new one"),
     skip_tls: bool = typer.Option(False, "--skip-tls", help="Skip SSL/TLS verification (not recommended)"),
     debug: bool = typer.Option(False, "--debug", help="Show verbose diagnostic output for network and extraction failures"),
-):
+) -> None:
     """Initialize a new Specify project from the latest template."""
     show_banner()
 
@@ -891,6 +895,7 @@ def init(
                 console.print("[yellow]Operation cancelled[/yellow]")
                 raise typer.Exit(0)
     else:
+        assert project_name is not None  # mypy: we know this is not None from validation above
         project_path = Path(project_name).resolve()
         if project_path.exists():
             console.print(f"[red]Error:[/red] Directory '{project_name}' already exists")
@@ -1054,8 +1059,8 @@ def init(
     console.print(steps_panel)
 
 
-@app.command()
-def check():
+@app.command()  # type: ignore[misc]
+def check() -> None:
     """Check that all required tools are installed."""
     show_banner()
     console.print("[bold]Checking for installed tools...[/bold]\n")
@@ -1074,7 +1079,7 @@ def check():
     code_ok = check_tool_for_tracker("code", "https://code.visualstudio.com/", tracker)
     if not code_ok:
         code_ok = check_tool_for_tracker("code-insiders", "https://code.visualstudio.com/insiders/", tracker)
-    cursor_ok = check_tool_for_tracker("cursor-agent", "https://cursor.sh/", tracker)
+    check_tool_for_tracker("cursor-agent", "https://cursor.sh/", tracker)
 
     console.print(tracker.render())
 
@@ -1091,11 +1096,11 @@ task_app = typer.Typer(help="Manage tasks in the current feature's tasks.md file
 app.add_typer(task_app, name="task")
 
 
-@task_app.command("complete")
+@task_app.command("complete")  # type: ignore[misc]
 def task_complete(
     task_id: str = typer.Argument(..., help="Task ID to mark complete (e.g., T001)"),
-    message: str = typer.Option(None, "--message", "-m", help="Optional commit message describing what was completed")
-):
+    message: Optional[str] = typer.Option(None, "--message", "-m", help="Optional commit message describing what was completed")
+) -> None:
     """Mark a task as complete in the tasks.md file."""
     tasks_file = find_tasks_file()
     if not tasks_file:
@@ -1133,8 +1138,8 @@ def task_complete(
         raise typer.Exit(1)
 
 
-@task_app.command("status")
-def task_status():
+@task_app.command("status")  # type: ignore[misc]
+def task_status() -> None:
     """Show status of all tasks in the current feature."""
     tasks_file = find_tasks_file()
     if not tasks_file:
@@ -1170,10 +1175,10 @@ def task_status():
             console.print(f"  [green]✓[/green] {task.task_id} {parallel} {task.description}")
 
 
-@task_app.command("list")
+@task_app.command("list")  # type: ignore[misc]
 def task_list(
     incomplete_only: bool = typer.Option(False, "--incomplete", "-i", help="Show only incomplete tasks")
-):
+) -> None:
     """List all tasks in the current feature."""
     tasks_file = find_tasks_file()
     if not tasks_file:
@@ -1203,10 +1208,10 @@ def task_list(
         console.print(f"  {status} {task.task_id} {parallel} {task.description}")
 
 
-@task_app.command("uncomplete")
+@task_app.command("uncomplete")  # type: ignore[misc]
 def task_uncomplete(
     task_id: str = typer.Argument(..., help="Task ID to mark incomplete (e.g., T001)")
-):
+) -> None:
     """Mark a task as incomplete in the tasks.md file."""
     tasks_file = find_tasks_file()
     if not tasks_file:
@@ -1235,7 +1240,7 @@ def task_uncomplete(
         raise typer.Exit(1)
 
 
-def main():
+def main() -> None:
     app()
 
 
