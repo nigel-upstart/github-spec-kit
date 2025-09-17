@@ -15,12 +15,14 @@ Specify CLI - Setup tool for Specify projects with task management
 
 Usage:
     uv run specify.py init <project-name>
+    uv run specify.py update
     uv run specify.py task complete T001
     uv run specify.py task status
 
 Or install globally:
     uv tool install specify.py
     specify init <project-name>
+    specify update
     specify task complete T001
 """
 
@@ -78,6 +80,28 @@ BANNER = """
 """
 
 TAGLINE = "Spec-Driven Development Toolkit"
+
+# Files/directories that are safe to update (infrastructure that users don't typically customize)
+UPDATABLE_PATHS = {
+    ".specify/",
+    ".claude/commands/",
+    "templates/",
+    "scripts/bash/",
+    "scripts/powershell/",
+}
+
+# Files that should be preserved (user-customizable content)
+PRESERVE_PATHS = {
+    "CONSTITUTION.md",
+    "README.md",
+    "specs/",
+    ".git/",
+    ".env",
+    "package.json",
+    "pyproject.toml",
+    "Cargo.toml",
+    "go.mod",
+}
 
 # ===== TASK TRACKING CLASSES =====
 
@@ -218,6 +242,25 @@ class TaskParser:
             'incomplete': incomplete,
             'progress_pct': round((completed / total * 100) if total > 0 else 0, 1)
         }
+
+
+def should_update_path(file_path: str, update_mode: bool) -> bool:
+    """Check if a file path should be updated in update mode."""
+    if not update_mode:
+        return True  # In init mode, update everything
+
+    # Check if path should be preserved
+    for preserve_path in PRESERVE_PATHS:
+        if file_path.startswith(preserve_path):
+            return False
+
+    # Check if path is updatable
+    for updatable_path in UPDATABLE_PATHS:
+        if file_path.startswith(updatable_path):
+            return True
+
+    # Default: preserve unknown files in update mode
+    return False
 
 
 def find_tasks_file(start_path: Optional[Path] = None) -> Optional[Path]:
@@ -667,7 +710,7 @@ def download_template_from_github(ai_assistant: str, download_dir: Path, *, scri
     return zip_path, metadata
 
 
-def download_and_extract_template(project_path: Path, ai_assistant: str, script_type: str, is_current_dir: bool = False, *, verbose: bool = True, tracker: Optional[StepTracker] = None, client: Optional[httpx.Client] = None, debug: bool = False) -> Path:
+def download_and_extract_template(project_path: Path, ai_assistant: str, script_type: str, is_current_dir: bool = False, *, verbose: bool = True, tracker: Optional[StepTracker] = None, client: Optional[httpx.Client] = None, debug: bool = False, update_mode: bool = False) -> Path:
     """Download the latest release and extract it to create a new project."""
     current_dir = Path.cwd()
 
@@ -734,8 +777,18 @@ def download_and_extract_template(project_path: Path, ai_assistant: str, script_
                         elif verbose:
                             console.print("[cyan]Found nested directory structure[/cyan]")
 
+                    updated_files = []
+                    skipped_files = []
+
                     for item in source_dir.iterdir():
                         dest_path = project_path / item.name
+
+                        # Check if this path should be updated
+                        if not should_update_path(item.name, update_mode):
+                            skipped_files.append(item.name)
+                            continue
+
+                        updated_files.append(item.name)
                         if item.is_dir():
                             if dest_path.exists():
                                 if verbose and not tracker:
@@ -743,6 +796,10 @@ def download_and_extract_template(project_path: Path, ai_assistant: str, script_
                                 for sub_item in item.rglob('*'):
                                     if sub_item.is_file():
                                         rel_path = sub_item.relative_to(item)
+                                        # Check individual files within directories too
+                                        full_rel_path = f"{item.name}/{rel_path}"
+                                        if not should_update_path(full_rel_path, update_mode):
+                                            continue
                                         dest_file = dest_path / rel_path
                                         dest_file.parent.mkdir(parents=True, exist_ok=True)
                                         shutil.copy2(sub_item, dest_file)
@@ -752,6 +809,12 @@ def download_and_extract_template(project_path: Path, ai_assistant: str, script_
                             if dest_path.exists() and verbose and not tracker:
                                 console.print(f"[yellow]Overwriting file:[/yellow] {item.name}")
                             shutil.copy2(item, dest_path)
+
+                    if update_mode and (verbose and not tracker):
+                        if updated_files:
+                            console.print(f"[green]Updated:[/green] {', '.join(updated_files)}")
+                        if skipped_files:
+                            console.print(f"[yellow]Preserved:[/yellow] {', '.join(skipped_files)}")
                     if verbose and not tracker:
                         console.print("[cyan]Template files merged into current directory[/cyan]")
             else:
@@ -1057,6 +1120,124 @@ def init(
     steps_panel = Panel("\n".join(steps_lines), title="Next steps", border_style="cyan", padding=(1,2))
     console.print()
     console.print(steps_panel)
+
+
+@app.command()  # type: ignore[misc]
+def update(
+    ai_assistant: Optional[str] = typer.Option(None, "--ai", help="AI assistant to use: claude, gemini, copilot, or cursor"),
+    script_type: Optional[str] = typer.Option(None, "--script", help="Script type to use: sh or ps"),
+    ignore_agent_tools: bool = typer.Option(False, "--ignore-agent-tools", help="Skip checks for AI agent tools like Claude Code"),
+    skip_tls: bool = typer.Option(False, "--skip-tls", help="Skip SSL/TLS verification (not recommended)"),
+    debug: bool = typer.Option(False, "--debug", help="Show verbose diagnostic output for network and extraction failures"),
+) -> None:
+    """Update Spec Kit infrastructure while preserving user content."""
+    show_banner()
+
+    project_path = Path.cwd()
+    project_name = project_path.name
+
+    console.print(Panel.fit(
+        "[bold cyan]Specify Project Update[/bold cyan]\n"
+        f"Updating infrastructure in: [green]{project_name}[/green]\n"
+        "[dim]User content (CONSTITUTION.md, specs/, etc.) will be preserved[/dim]",
+        border_style="cyan"
+    ))
+
+    # AI assistant selection
+    if ai_assistant:
+        if ai_assistant not in AI_CHOICES:
+            console.print(f"[red]Error:[/red] Invalid AI assistant '{ai_assistant}'. Choose from: {', '.join(AI_CHOICES.keys())}")
+            raise typer.Exit(1)
+        selected_ai = ai_assistant
+    else:
+        selected_ai = select_with_arrows(
+            AI_CHOICES,
+            "Choose your AI assistant:",
+            "copilot"
+        )
+
+    # Check agent tools unless ignored
+    if not ignore_agent_tools:
+        agent_tool_missing = False
+        if selected_ai == "claude":
+            if not check_tool("claude", "Install from: https://docs.anthropic.com/en/docs/claude-code/setup"):
+                console.print("[red]Error:[/red] Claude CLI is required for Claude Code projects")
+                agent_tool_missing = True
+        elif selected_ai == "gemini":
+            if not check_tool("gemini", "Install from: https://github.com/google-gemini/gemini-cli"):
+                console.print("[red]Error:[/red] Gemini CLI is required for Gemini projects")
+                agent_tool_missing = True
+
+        if agent_tool_missing:
+            console.print("\n[red]Required AI tool is missing![/red]")
+            console.print("[yellow]Tip:[/yellow] Use --ignore-agent-tools to skip this check")
+            raise typer.Exit(1)
+
+    # Determine script type
+    if script_type:
+        if script_type not in SCRIPT_TYPE_CHOICES:
+            console.print(f"[red]Error:[/red] Invalid script type '{script_type}'. Choose from: {', '.join(SCRIPT_TYPE_CHOICES.keys())}")
+            raise typer.Exit(1)
+        selected_script = script_type
+    else:
+        default_script = "ps" if os.name == "nt" else "sh"
+        if sys.stdin.isatty():
+            selected_script = select_with_arrows(SCRIPT_TYPE_CHOICES, "Choose script type (or press Enter)", default_script)
+        else:
+            selected_script = default_script
+
+    console.print(f"[cyan]Selected AI assistant:[/cyan] {selected_ai}")
+    console.print(f"[cyan]Selected script type:[/cyan] {selected_script}")
+
+    # Update infrastructure
+    tracker = StepTracker("Update Specify Infrastructure")
+    tracker.add("precheck", "Check required tools")
+    tracker.complete("precheck", "ok")
+    tracker.add("ai-select", "Select AI assistant")
+    tracker.complete("ai-select", f"{selected_ai}")
+    tracker.add("script-select", "Select script type")
+    tracker.complete("script-select", selected_script)
+    for key, label in [
+        ("fetch", "Fetch latest release"),
+        ("download", "Download template"),
+        ("extract", "Update infrastructure"),
+        ("zip-list", "Archive contents"),
+        ("extracted-summary", "Update summary"),
+        ("chmod", "Ensure scripts executable"),
+        ("cleanup", "Cleanup"),
+        ("final", "Finalize")
+    ]:
+        tracker.add(key, label)
+
+    with Live(tracker.render(), console=console, refresh_per_second=8, transient=True) as live:
+        tracker.attach_refresh(lambda: live.update(tracker.render()))
+        try:
+            verify = not skip_tls
+            local_ssl_context = ssl_context if verify else False
+            local_client = httpx.Client(verify=local_ssl_context)
+
+            download_and_extract_template(project_path, selected_ai, selected_script, is_current_dir=True, verbose=False, tracker=tracker, client=local_client, debug=debug, update_mode=True)
+
+            ensure_executable_scripts(project_path, tracker=tracker)
+
+            tracker.complete("final", "infrastructure updated")
+        except Exception as e:
+            tracker.error("final", str(e))
+            console.print(f"\n[red]Update failed:[/red] {e}")
+            if debug:
+                env_lines = [
+                    f"Working Directory: {Path.cwd()}",
+                    f"Project Path: {project_path}",
+                    f"AI Assistant: {selected_ai}",
+                    f"Script Type: {selected_script}",
+                    f"Error: {str(e)}"
+                ]
+                console.print(Panel("\n".join(env_lines), title="Debug Environment", border_style="magenta"))
+            raise typer.Exit(1)
+
+    console.print(tracker.render())
+    console.print("\n[bold green]Infrastructure updated successfully.[/bold green]")
+    console.print("[dim]User content has been preserved during the update[/dim]")
 
 
 @app.command()  # type: ignore[misc]
