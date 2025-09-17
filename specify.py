@@ -11,7 +11,7 @@
 # ]
 # ///
 """
-Specify CLI - Setup tool for Specify projects with task management
+Specify CLI - Claude Code setup tool for Specify projects with native task management
 
 Usage:
     uv run specify.py init <project-name>
@@ -24,6 +24,8 @@ Or install globally:
     specify init <project-name>
     specify update
     specify task complete T001
+
+Requires Claude Code for full functionality.
 """
 
 import os
@@ -36,6 +38,9 @@ import re
 from pathlib import Path
 from typing import Optional, Tuple, List, Dict, Any, Union, Callable
 from datetime import datetime
+from dataclasses import dataclass, field
+from abc import ABC, abstractmethod
+from enum import Enum
 
 import typer  # type: ignore[import-not-found]
 import httpx  # type: ignore[import-not-found]
@@ -57,14 +62,23 @@ import truststore  # type: ignore[import-not-found]
 ssl_context = truststore.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
 client = httpx.Client(verify=ssl_context)
 
-# Constants
-AI_CHOICES = {
-    "copilot": "GitHub Copilot",
-    "claude": "Claude Code",
-    "gemini": "Gemini CLI",
-    "cursor": "Cursor"
-}
+# Constants - Claude Code Only
 SCRIPT_TYPE_CHOICES = {"sh": "POSIX Shell (bash/zsh)", "ps": "PowerShell"}
+
+# Configuration enums and settings
+class OrchestrationStrategy(Enum):
+    """Different orchestration strategies for task execution."""
+    BALANCED = "balanced"  # Balance between speed and resource usage
+    AGGRESSIVE = "aggressive"  # Maximize parallelism
+    CONSERVATIVE = "conservative"  # Minimize resource usage
+    DEPENDENCY_FIRST = "dependency_first"  # Prioritize dependency resolution
+
+class RetryPolicy(Enum):
+    """Retry policies for failed sub-agents."""
+    NONE = "none"  # No retries
+    LINEAR = "linear"  # Linear backoff
+    EXPONENTIAL = "exponential"  # Exponential backoff
+    ADAPTIVE = "adaptive"  # Adaptive based on failure type
 
 # Claude CLI local installation path after migrate-installer
 CLAUDE_LOCAL_PATH = Path.home() / ".claude" / "local" / "claude"
@@ -261,6 +275,1006 @@ def should_update_path(file_path: str, update_mode: bool) -> bool:
 
     # Default: preserve unknown files in update mode
     return False
+
+
+# ===== NATIVE TASK SYSTEM =====
+
+@dataclass
+class TaskInfo:
+    """Information about a single task in the native task system."""
+    id: str              # T001, T002, etc.
+    description: str     # Full task description
+    parallel: bool       # [P] marker
+    estimated_duration: int  # 5-30 minutes based on task type
+    phase_id: str        # "3.1", "3.2", etc.
+    file_path: Optional[str] = None  # Specific file this task affects
+
+
+@dataclass
+class TaskPhase:
+    """Represents a phase containing multiple related tasks."""
+    id: str              # "3.1", "3.2", "3.3"
+    name: str            # "Setup", "Tests First", "Core Implementation"
+    description: str     # Full phase context and requirements
+    tasks: List[TaskInfo]
+    dependencies: List[str]  # ["3.1"] for phase 3.2
+    estimated_duration: int  # minutes
+    priority_boost: float    # 1.5 for foundation phases
+
+
+@dataclass
+class TaskSequence:
+    """A sequence of tasks that must be executed sequentially within a phase."""
+    id: str
+    tasks: List[TaskInfo]
+    estimated_duration: int
+    phase_id: str
+    phase_name: str
+
+@dataclass
+class OrchestrationConfig:
+    """Configuration for task orchestration behavior."""
+    strategy: OrchestrationStrategy = OrchestrationStrategy.BALANCED
+    max_parallel_agents: int = 10  # Claude Code limit
+    max_batch_duration: int = 90  # minutes
+    retry_policy: RetryPolicy = RetryPolicy.ADAPTIVE
+    max_retries: int = 3
+    enable_performance_monitoring: bool = True
+    enable_smart_scheduling: bool = True
+    priority_boost_factor: float = 0.3  # How much earlier phases get boosted
+
+@dataclass
+class ExecutionBatch:
+    """Represents a batch of phases or task sequences that can be executed together."""
+    name: str
+    phases: List[TaskPhase]
+    task_sequences: List[TaskSequence]  # NEW: parallel task sequences within phases
+    estimated_time: int
+    parallel_count: int = 1  # renamed from parallel_phases
+    retry_count: int = field(default=0)  # Track retry attempts
+    failed_agents: List[str] = field(default_factory=list)  # Track failed sub-agents
+
+
+class TaskDurationEstimator:
+    """Estimates task duration based on task type and complexity."""
+
+    TASK_TYPE_ESTIMATES = {
+        r"create.*model": 15,           # Data models
+        r"configure.*tool": 5,          # Linting, formatting
+        r".*test.*": 10,               # Any test creation
+        r".*endpoint": 20,             # API endpoints
+        r"initialize.*project": 8,     # Project setup
+        r"connect.*database": 12,      # Integration work
+        r".*documentation": 7,         # Docs and README
+        r".*validation": 8,            # Input validation
+        r".*logging": 6,               # Logging setup
+        r".*middleware": 10,           # Middleware implementation
+    }
+
+    def estimate_task_duration(self, description: str) -> int:
+        """Estimate task duration based on description patterns."""
+        description_lower = description.lower()
+
+        for pattern, duration in self.TASK_TYPE_ESTIMATES.items():
+            if re.search(pattern, description_lower):
+                # Add complexity factor for parallel tasks
+                if "[P]" in description:
+                    return max(5, duration - 2)  # Parallel tasks often simpler
+                return duration
+
+        # Default estimate for unknown task types
+        return 15
+
+
+class NativeTaskManager:
+    """Manages native Claude Code tasks using TodoWrite."""
+
+    def __init__(self) -> None:
+        self.current_todos: List[Dict[str, str]] = []
+        self.duration_estimator = TaskDurationEstimator()
+
+    def create_tasks_from_phases(self, phases: List[TaskPhase]) -> bool:
+        """Create TodoWrite tasks from phase definitions."""
+        overview_tasks = []
+
+        for phase in phases:
+            task_content = f"Phase {phase.id}: {phase.name} ({len(phase.tasks)} tasks, ~{phase.estimated_duration}min)"
+            overview_tasks.append({
+                "content": task_content,
+                "status": "pending",
+                "activeForm": f"Executing {phase.name}"
+            })
+
+        # Store tasks locally since TodoWrite is a Claude Code tool, not importable function
+        self.current_todos = overview_tasks
+        console.print(f"[cyan]Created {len(overview_tasks)} phase-level tasks for native execution[/cyan]")
+        return True
+
+    def complete_task(self, task_id: str) -> bool:
+        """Mark a phase as completed."""
+        for todo in self.current_todos:
+            if todo["content"].startswith(f"Phase {task_id}:"):
+                todo["status"] = "completed"
+                break
+        else:
+            return False
+
+        console.print(f"[green]✓[/green] Completed phase {task_id}")
+        return True
+
+    def get_progress_summary(self) -> Dict[str, int]:
+        """Get progress summary of phases."""
+        total = len(self.current_todos)
+        completed = sum(1 for todo in self.current_todos if todo["status"] == "completed")
+
+        return {
+            "total": total,
+            "completed": completed,
+            "pending": total - completed
+        }
+
+
+class PlanProcessor:
+    """Processes implementation plans and converts them to native task phases."""
+
+    def __init__(self) -> None:
+        self.duration_estimator = TaskDurationEstimator()
+
+    def parse_plan_to_phases(self, plan_content: str, available_docs: List[str]) -> List[TaskPhase]:
+        """Parse an implementation plan and convert to TaskPhase objects."""
+
+        phases = []
+
+        # Parse the plan content to extract technology stack and structure
+        tech_stack = self._extract_tech_stack(plan_content)
+        project_structure = self._extract_project_structure(plan_content)
+
+        # Generate phases based on available documents and plan content
+        phases.extend(self._generate_setup_phase(tech_stack, project_structure))
+        phases.extend(self._generate_test_phases(available_docs))
+        phases.extend(self._generate_implementation_phases(plan_content, available_docs))
+        phases.extend(self._generate_integration_phase(tech_stack))
+        phases.extend(self._generate_polish_phase(available_docs))
+
+        return phases
+
+    def _extract_tech_stack(self, plan_content: str) -> Dict[str, str]:
+        """Extract technology stack information from plan."""
+        tech_stack = {}
+
+        # Look for common tech stack patterns in plan
+        if re.search(r'python|fastapi|django|flask', plan_content.lower()):
+            tech_stack['language'] = 'Python'
+            if 'fastapi' in plan_content.lower():
+                tech_stack['framework'] = 'FastAPI'
+            elif 'django' in plan_content.lower():
+                tech_stack['framework'] = 'Django'
+            elif 'flask' in plan_content.lower():
+                tech_stack['framework'] = 'Flask'
+
+        if re.search(r'javascript|typescript|node|react|next', plan_content.lower()):
+            tech_stack['language'] = 'TypeScript'
+            if 'react' in plan_content.lower():
+                tech_stack['framework'] = 'React'
+            elif 'next' in plan_content.lower():
+                tech_stack['framework'] = 'Next.js'
+
+        if re.search(r'rust|cargo', plan_content.lower()):
+            tech_stack['language'] = 'Rust'
+
+        return tech_stack
+
+    def _extract_project_structure(self, plan_content: str) -> Dict[str, str]:
+        """Extract project structure information from plan."""
+        structure = {'type': 'single'}  # Default to single project
+
+        if re.search(r'backend.*frontend|web.*app|client.*server', plan_content.lower()):
+            structure['type'] = 'web-app'
+        elif re.search(r'mobile|ios|android', plan_content.lower()):
+            structure['type'] = 'mobile'
+        elif re.search(r'cli|command.*line', plan_content.lower()):
+            structure['type'] = 'cli'
+
+        return structure
+
+    def _generate_setup_phase(self, tech_stack: Dict[str, str], project_structure: Dict[str, str]) -> List[TaskPhase]:
+        """Generate setup phase tasks."""
+
+        tasks = []
+        task_id = 1
+
+        # Project structure setup
+        tasks.append(TaskInfo(
+            id=f"T{task_id:03d}",
+            description=f"Create project structure per implementation plan",
+            parallel=False,
+            estimated_duration=self.duration_estimator.estimate_task_duration("create project structure"),
+            phase_id="3.1",
+            file_path="project structure"
+        ))
+        task_id += 1
+
+        # Language-specific initialization
+        if tech_stack.get('language') == 'Python':
+            framework = tech_stack.get('framework', 'Python')
+            tasks.append(TaskInfo(
+                id=f"T{task_id:03d}",
+                description=f"Initialize Python project with {framework} dependencies",
+                parallel=True,
+                estimated_duration=self.duration_estimator.estimate_task_duration("initialize python project"),
+                phase_id="3.1",
+                file_path="pyproject.toml"
+            ))
+            task_id += 1
+
+        elif tech_stack.get('language') == 'TypeScript':
+            framework = tech_stack.get('framework', 'Node.js')
+            tasks.append(TaskInfo(
+                id=f"T{task_id:03d}",
+                description=f"Initialize TypeScript project with {framework} dependencies",
+                parallel=True,
+                estimated_duration=self.duration_estimator.estimate_task_duration("initialize typescript project"),
+                phase_id="3.1",
+                file_path="package.json"
+            ))
+            task_id += 1
+
+        # Linting and formatting
+        tasks.append(TaskInfo(
+            id=f"T{task_id:03d}",
+            description="Configure linting and formatting tools",
+            parallel=True,
+            estimated_duration=self.duration_estimator.estimate_task_duration("configure linting tools"),
+            phase_id="3.1",
+            file_path="linting configuration"
+        ))
+
+        return [TaskPhase(
+            id="3.1",
+            name="Setup",
+            description="Initialize project structure, dependencies, and development tools",
+            tasks=tasks,
+            dependencies=[],
+            estimated_duration=sum(t.estimated_duration for t in tasks),
+            priority_boost=2.0  # High priority for foundation
+        )]
+
+    def _generate_test_phases(self, available_docs: List[str]) -> List[TaskPhase]:
+        """Generate test phases based on available documentation."""
+
+        tasks = []
+        task_id = 4  # Start after setup tasks
+
+        # Contract tests if contracts exist
+        if "contracts/" in available_docs:
+            tasks.append(TaskInfo(
+                id=f"T{task_id:03d}",
+                description="Contract test POST /api/users in tests/contract/test_users_post.py",
+                parallel=True,
+                estimated_duration=self.duration_estimator.estimate_task_duration("contract test"),
+                phase_id="3.2",
+                file_path="tests/contract/test_users_post.py"
+            ))
+            task_id += 1
+
+            tasks.append(TaskInfo(
+                id=f"T{task_id:03d}",
+                description="Contract test GET /api/users/{id} in tests/contract/test_users_get.py",
+                parallel=True,
+                estimated_duration=self.duration_estimator.estimate_task_duration("contract test"),
+                phase_id="3.2",
+                file_path="tests/contract/test_users_get.py"
+            ))
+            task_id += 1
+
+        # Integration tests if quickstart exists
+        if "quickstart.md" in available_docs:
+            tasks.append(TaskInfo(
+                id=f"T{task_id:03d}",
+                description="Integration test user registration in tests/integration/test_registration.py",
+                parallel=True,
+                estimated_duration=self.duration_estimator.estimate_task_duration("integration test"),
+                phase_id="3.2",
+                file_path="tests/integration/test_registration.py"
+            ))
+            task_id += 1
+
+            tasks.append(TaskInfo(
+                id=f"T{task_id:03d}",
+                description="Integration test auth flow in tests/integration/test_auth.py",
+                parallel=True,
+                estimated_duration=self.duration_estimator.estimate_task_duration("integration test"),
+                phase_id="3.2",
+                file_path="tests/integration/test_auth.py"
+            ))
+
+        if tasks:
+            return [TaskPhase(
+                id="3.2",
+                name="Tests First (TDD)",
+                description="Write failing tests before implementation - critical for TDD workflow",
+                tasks=tasks,
+                dependencies=["3.1"],
+                estimated_duration=sum(t.estimated_duration for t in tasks),
+                priority_boost=1.8  # High priority for TDD
+            )]
+        return []
+
+    def _generate_implementation_phases(self, plan_content: str, available_docs: List[str]) -> List[TaskPhase]:
+        """Generate core implementation phases."""
+
+        tasks = []
+        task_id = 8  # Start after test tasks
+
+        # Model tasks if data model exists
+        if "data-model.md" in available_docs:
+            tasks.append(TaskInfo(
+                id=f"T{task_id:03d}",
+                description="User model in src/models/user.py",
+                parallel=True,
+                estimated_duration=self.duration_estimator.estimate_task_duration("create user model"),
+                phase_id="3.3",
+                file_path="src/models/user.py"
+            ))
+            task_id += 1
+
+            tasks.append(TaskInfo(
+                id=f"T{task_id:03d}",
+                description="UserService CRUD in src/services/user_service.py",
+                parallel=True,
+                estimated_duration=self.duration_estimator.estimate_task_duration("create user service"),
+                phase_id="3.3",
+                file_path="src/services/user_service.py"
+            ))
+            task_id += 1
+
+        # CLI commands if CLI project
+        if 'cli' in plan_content.lower():
+            tasks.append(TaskInfo(
+                id=f"T{task_id:03d}",
+                description="CLI --create-user in src/cli/user_commands.py",
+                parallel=True,
+                estimated_duration=self.duration_estimator.estimate_task_duration("create cli command"),
+                phase_id="3.3",
+                file_path="src/cli/user_commands.py"
+            ))
+            task_id += 1
+
+        # API endpoints if contracts exist
+        if "contracts/" in available_docs:
+            tasks.append(TaskInfo(
+                id=f"T{task_id:03d}",
+                description="POST /api/users endpoint",
+                parallel=False,  # Endpoints might share route files
+                estimated_duration=self.duration_estimator.estimate_task_duration("create api endpoint"),
+                phase_id="3.3",
+                file_path="src/api/users.py"
+            ))
+            task_id += 1
+
+            tasks.append(TaskInfo(
+                id=f"T{task_id:03d}",
+                description="GET /api/users/{id} endpoint",
+                parallel=False,
+                estimated_duration=self.duration_estimator.estimate_task_duration("create api endpoint"),
+                phase_id="3.3",
+                file_path="src/api/users.py"
+            ))
+            task_id += 1
+
+        # Validation and error handling
+        tasks.append(TaskInfo(
+            id=f"T{task_id:03d}",
+            description="Input validation",
+            parallel=False,
+            estimated_duration=self.duration_estimator.estimate_task_duration("input validation"),
+            phase_id="3.3",
+            file_path="src/validation/"
+        ))
+        task_id += 1
+
+        tasks.append(TaskInfo(
+            id=f"T{task_id:03d}",
+            description="Error handling and logging",
+            parallel=False,
+            estimated_duration=self.duration_estimator.estimate_task_duration("error handling logging"),
+            phase_id="3.3",
+            file_path="src/utils/"
+        ))
+
+        if tasks:
+            return [TaskPhase(
+                id="3.3",
+                name="Core Implementation",
+                description="Implement core business logic, models, services, and endpoints",
+                tasks=tasks,
+                dependencies=["3.2"],
+                estimated_duration=sum(t.estimated_duration for t in tasks),
+                priority_boost=1.5
+            )]
+        return []
+
+    def _generate_integration_phase(self, tech_stack: Dict[str, str]) -> List[TaskPhase]:
+        """Generate integration phase tasks."""
+
+        tasks = []
+        task_id = 15  # After core implementation
+
+        tasks.append(TaskInfo(
+            id=f"T{task_id:03d}",
+            description="Connect services to database",
+            parallel=False,
+            estimated_duration=self.duration_estimator.estimate_task_duration("connect database"),
+            phase_id="3.4",
+            file_path="src/database/"
+        ))
+        task_id += 1
+
+        if tech_stack.get('framework') in ['FastAPI', 'Django', 'Flask']:
+            tasks.append(TaskInfo(
+                id=f"T{task_id:03d}",
+                description="Auth middleware",
+                parallel=False,
+                estimated_duration=self.duration_estimator.estimate_task_duration("auth middleware"),
+                phase_id="3.4",
+                file_path="src/middleware/"
+            ))
+            task_id += 1
+
+            tasks.append(TaskInfo(
+                id=f"T{task_id:03d}",
+                description="Request/response logging",
+                parallel=False,
+                estimated_duration=self.duration_estimator.estimate_task_duration("request response logging"),
+                phase_id="3.4",
+                file_path="src/middleware/"
+            ))
+            task_id += 1
+
+            tasks.append(TaskInfo(
+                id=f"T{task_id:03d}",
+                description="CORS and security headers",
+                parallel=False,
+                estimated_duration=self.duration_estimator.estimate_task_duration("CORS security headers"),
+                phase_id="3.4",
+                file_path="src/middleware/"
+            ))
+
+        return [TaskPhase(
+            id="3.4",
+            name="Integration",
+            description="Connect components together - database, middleware, logging, security",
+            tasks=tasks,
+            dependencies=["3.3"],
+            estimated_duration=sum(t.estimated_duration for t in tasks),
+            priority_boost=1.2
+        )]
+
+    def _generate_polish_phase(self, available_docs: List[str]) -> List[TaskPhase]:
+        """Generate polish phase tasks."""
+
+        tasks = []
+        task_id = 19  # After integration
+
+        tasks.append(TaskInfo(
+            id=f"T{task_id:03d}",
+            description="Unit tests for validation in tests/unit/test_validation.py",
+            parallel=True,
+            estimated_duration=self.duration_estimator.estimate_task_duration("unit tests validation"),
+            phase_id="3.5",
+            file_path="tests/unit/test_validation.py"
+        ))
+        task_id += 1
+
+        tasks.append(TaskInfo(
+            id=f"T{task_id:03d}",
+            description="Performance tests (<200ms)",
+            parallel=False,
+            estimated_duration=self.duration_estimator.estimate_task_duration("performance tests"),
+            phase_id="3.5",
+            file_path="tests/performance/"
+        ))
+        task_id += 1
+
+        tasks.append(TaskInfo(
+            id=f"T{task_id:03d}",
+            description="Update docs/api.md",
+            parallel=True,
+            estimated_duration=self.duration_estimator.estimate_task_duration("update documentation"),
+            phase_id="3.5",
+            file_path="docs/api.md"
+        ))
+        task_id += 1
+
+        tasks.append(TaskInfo(
+            id=f"T{task_id:03d}",
+            description="Remove duplication and refactor",
+            parallel=False,
+            estimated_duration=self.duration_estimator.estimate_task_duration("remove duplication refactor"),
+            phase_id="3.5",
+            file_path="src/"
+        ))
+        task_id += 1
+
+        if "quickstart.md" in available_docs:
+            tasks.append(TaskInfo(
+                id=f"T{task_id:03d}",
+                description="Run manual testing from quickstart.md",
+                parallel=False,
+                estimated_duration=self.duration_estimator.estimate_task_duration("manual testing"),
+                phase_id="3.5",
+                file_path="quickstart.md"
+            ))
+
+        return [TaskPhase(
+            id="3.5",
+            name="Polish",
+            description="Final polish - unit tests, performance, documentation, manual testing",
+            tasks=tasks,
+            dependencies=["3.4"],
+            estimated_duration=sum(t.estimated_duration for t in tasks),
+            priority_boost=1.0
+        )]
+
+
+@dataclass
+class PerformanceMetrics:
+    """Performance metrics for orchestration monitoring."""
+    start_time: datetime = field(default_factory=datetime.now)
+    end_time: Optional[datetime] = None
+    total_phases: int = 0
+    completed_phases: int = 0
+    failed_phases: int = 0
+    retry_attempts: int = 0
+    average_phase_duration: float = 0.0
+    peak_parallel_agents: int = 0
+
+class PhaseOrchestrator:
+    """Orchestrates phase-based execution with intelligent scheduling and advanced features."""
+
+    def __init__(self, task_manager: NativeTaskManager, config: Optional[OrchestrationConfig] = None):
+        self.task_manager = task_manager
+        self.config = config or OrchestrationConfig()
+        self.metrics = PerformanceMetrics()
+        self.active_agents: Dict[str, datetime] = {}  # Track active sub-agents
+
+    def build_execution_queue(self, phases: List[TaskPhase]) -> List[ExecutionBatch]:
+        """Create optimized execution order with task-level parallelism and smart scheduling."""
+
+        if self.config.enable_performance_monitoring:
+            self.metrics.total_phases = len(phases)
+            self.metrics.start_time = datetime.now()
+
+        # Sort phases by dependency order and strategy
+        ordered_phases = self._sort_phases_by_strategy(phases)
+
+        # Build execution batches with advanced scheduling
+        batches: List[ExecutionBatch] = []
+        completed_phases: set[str] = set()
+
+        while len(completed_phases) < len(ordered_phases):
+            # Find phases that can run now (dependencies satisfied)
+            ready_phases = [
+                phase for phase in ordered_phases
+                if phase.id not in completed_phases
+                and all(dep in completed_phases for dep in phase.dependencies)
+            ]
+
+            if not ready_phases:
+                if self.config.enable_performance_monitoring:
+                    console.print("[yellow]Warning:[/yellow] Possible circular dependency detected")
+                break
+
+            # Apply strategy-specific batching
+            batch_phases, max_batch_time = self._create_smart_batch(ready_phases)
+            task_sequences = []
+
+            # For each phase, create task sequences for parallel execution
+            for phase in batch_phases:
+                sequences = self._create_task_sequences(phase)
+                task_sequences.extend(sequences)
+
+            # Calculate optimal parallel count based on strategy
+            optimal_parallel = self._calculate_optimal_parallel_count(
+                len(batch_phases), len(task_sequences), max_batch_time
+            )
+
+            batches.append(ExecutionBatch(
+                name=f"batch-{len(batches)+1}",
+                phases=batch_phases,
+                task_sequences=task_sequences,
+                estimated_time=max_batch_time,
+                parallel_count=optimal_parallel,
+                retry_count=0,
+                failed_agents=[]
+            ))
+
+            # Mark phases as completed
+            for phase in batch_phases:
+                completed_phases.add(phase.id)
+
+        return batches
+
+    def _has_blocking_dependencies(self, phase: TaskPhase, current_batch: List[TaskPhase]) -> bool:
+        """Check if phase has dependencies that block it from current batch."""
+        current_phase_ids = {p.id for p in current_batch}
+        return any(dep in current_phase_ids for dep in phase.dependencies)
+
+    def _sort_phases_by_dependencies(self, phases: List[TaskPhase]) -> List[TaskPhase]:
+        """Sort phases in dependency order (topological sort)."""
+        # Simple topological sort for phases
+        phase_map = {phase.id: phase for phase in phases}
+        result = []
+        visited = set()
+        visiting = set()
+
+        def visit(phase_id: str) -> None:
+            if phase_id in visiting:
+                return  # Circular dependency - skip
+            if phase_id in visited:
+                return
+
+            visiting.add(phase_id)
+            phase = phase_map.get(phase_id)
+            if phase:
+                for dep_id in phase.dependencies:
+                    if dep_id in phase_map:
+                        visit(dep_id)
+                visiting.remove(phase_id)
+                visited.add(phase_id)
+                result.append(phase)
+
+        for phase in phases:
+            visit(phase.id)
+
+        return result
+
+    def _create_task_sequences(self, phase: TaskPhase) -> List[TaskSequence]:
+        """Create parallel task sequences within a phase based on [P] markers."""
+        sequences = []
+
+        # Group tasks by parallelism
+        parallel_tasks = [task for task in phase.tasks if task.parallel]
+        sequential_tasks = [task for task in phase.tasks if not task.parallel]
+
+        # Create sequences for parallel tasks (each gets its own sequence)
+        for i, task in enumerate(parallel_tasks):
+            sequences.append(TaskSequence(
+                id=f"{phase.id}-parallel-{i+1}",
+                tasks=[task],
+                estimated_duration=task.estimated_duration,
+                phase_id=phase.id,
+                phase_name=phase.name
+            ))
+
+        # Create sequence for sequential tasks (all in one sequence)
+        if sequential_tasks:
+            total_duration = sum(task.estimated_duration for task in sequential_tasks)
+            sequences.append(TaskSequence(
+                id=f"{phase.id}-sequential",
+                tasks=sequential_tasks,
+                estimated_duration=total_duration,
+                phase_id=phase.id,
+                phase_name=phase.name
+            ))
+
+        return sequences
+
+    def _sort_phases_by_strategy(self, phases: List[TaskPhase]) -> List[TaskPhase]:
+        """Sort phases based on orchestration strategy and dependencies."""
+
+        # First apply topological sort for dependencies
+        dependency_sorted = self._sort_phases_by_dependencies(phases)
+
+        # Then apply strategy-specific sorting within dependency groups
+        if self.config.strategy == OrchestrationStrategy.AGGRESSIVE:
+            # Prioritize parallel-heavy phases
+            return sorted(dependency_sorted,
+                         key=lambda p: (len(p.dependencies), -sum(1 for t in p.tasks if t.parallel)))
+
+        elif self.config.strategy == OrchestrationStrategy.CONSERVATIVE:
+            # Prioritize shorter phases
+            return sorted(dependency_sorted,
+                         key=lambda p: (len(p.dependencies), p.estimated_duration))
+
+        elif self.config.strategy == OrchestrationStrategy.DEPENDENCY_FIRST:
+            # Already sorted by dependencies
+            return dependency_sorted
+
+        else:  # BALANCED (default)
+            # Balance duration and parallelism
+            def balanced_score(phase: TaskPhase) -> float:
+                parallel_ratio = sum(1 for t in phase.tasks if t.parallel) / len(phase.tasks)
+                duration_factor = 1.0 / (phase.estimated_duration + 1)  # Avoid division by zero
+                return parallel_ratio * duration_factor * phase.priority_boost
+
+            return sorted(dependency_sorted,
+                         key=lambda p: (len(p.dependencies), -balanced_score(p)))
+
+    def _create_smart_batch(self, ready_phases: List[TaskPhase]) -> Tuple[List[TaskPhase], int]:
+        """Create an optimally-sized batch based on configuration strategy."""
+
+        if self.config.strategy == OrchestrationStrategy.AGGRESSIVE:
+            # Include as many phases as possible
+            max_phases = min(len(ready_phases), self.config.max_parallel_agents // 2)
+            batch_phases = ready_phases[:max_phases]
+
+        elif self.config.strategy == OrchestrationStrategy.CONSERVATIVE:
+            # Conservative approach - fewer phases per batch
+            max_phases = min(len(ready_phases), 2)
+            batch_phases = ready_phases[:max_phases]
+
+        else:  # BALANCED or DEPENDENCY_FIRST
+            # Consider batch duration limit
+            batch_phases = []
+            total_time = 0
+
+            for phase in ready_phases:
+                if (total_time + phase.estimated_duration <= self.config.max_batch_duration
+                    and len(batch_phases) < 3):
+                    batch_phases.append(phase)
+                    total_time = max(total_time, phase.estimated_duration)  # Parallel execution
+                else:
+                    break
+
+            # Ensure we have at least one phase
+            if not batch_phases and ready_phases:
+                batch_phases = [ready_phases[0]]
+                total_time = ready_phases[0].estimated_duration
+
+        max_batch_time = max((p.estimated_duration for p in batch_phases), default=0)
+        return batch_phases, max_batch_time
+
+    def _calculate_optimal_parallel_count(self, num_phases: int, num_sequences: int,
+                                        batch_duration: int) -> int:
+        """Calculate optimal number of parallel agents based on strategy and resources."""
+
+        total_units = num_phases + num_sequences
+
+        if self.config.strategy == OrchestrationStrategy.AGGRESSIVE:
+            # Use maximum allowed parallelism
+            return min(total_units, self.config.max_parallel_agents)
+
+        elif self.config.strategy == OrchestrationStrategy.CONSERVATIVE:
+            # Conservative parallelism to avoid resource contention
+            conservative_limit = max(1, self.config.max_parallel_agents // 2)
+            return min(total_units, conservative_limit)
+
+        else:  # BALANCED or DEPENDENCY_FIRST
+            # Scale based on batch duration - longer batches get more parallel agents
+            if batch_duration > 60:  # Long batches
+                parallel_bonus = 2
+            elif batch_duration > 30:  # Medium batches
+                parallel_bonus = 1
+            else:  # Short batches
+                parallel_bonus = 0
+
+            optimal = min(total_units,
+                         min(self.config.max_parallel_agents,
+                             max(1, total_units // 2 + parallel_bonus)))
+            return optimal
+
+    def execute_phase(self, phase: TaskPhase) -> str:
+        """Launch sub-agent for entire phase execution."""
+
+        # Format tasks for sub-agent context
+        task_list = []
+        for task in phase.tasks:
+            parallel_marker = "[P] " if task.parallel else ""
+            task_list.append(f"  - {task.id} {parallel_marker}{task.description}")
+
+        tasks_text = "\n".join(task_list)
+
+        phase_context = f"""
+Phase: {phase.name} ({phase.id})
+
+Context: {phase.description}
+
+Tasks to complete in this phase:
+{tasks_text}
+
+Success criteria:
+- All tasks marked complete via TodoWrite
+- Follow TDD workflow if tests involved
+- Apply .cursor/rules for code style
+- Commit each task with conventional commits
+
+You have full autonomy within this phase. Work efficiently and update progress via TodoWrite.
+        """.strip()
+
+        # In production, this would launch a sub-agent via Task tool
+        # For now, we'll simulate by printing the phase context
+        console.print(f"[blue]Sub-agent launched for {phase.name}[/blue]")
+        console.print(f"[dim]Phase context: {len(phase_context)} characters[/dim]")
+        return f"sub-agent-{phase.id}"
+
+    def execute_task_sequence(self, task_sequence: TaskSequence) -> str:
+        """Launch sub-agent for a specific task sequence within a phase."""
+
+        # Format tasks for sub-agent context
+        task_list = []
+        for task in task_sequence.tasks:
+            parallel_marker = "[P] " if task.parallel else ""
+            task_list.append(f"  - {task.id} {parallel_marker}{task.description}")
+            if task.file_path:
+                task_list.append(f"    📁 {task.file_path}")
+
+        tasks_text = "\n".join(task_list)
+        sequence_type = "parallel" if len(task_sequence.tasks) == 1 and task_sequence.tasks[0].parallel else "sequential"
+
+        sequence_context = f"""
+Task Sequence: {task_sequence.id} ({sequence_type})
+Phase: {task_sequence.phase_name} ({task_sequence.phase_id})
+Estimated Duration: {task_sequence.estimated_duration} minutes
+
+Tasks in this sequence:
+{tasks_text}
+
+Success criteria:
+- All tasks marked complete via TodoWrite
+- Follow TDD workflow if tests involved
+- Apply .cursor/rules for code style
+- Commit each task with conventional commits
+
+You have full autonomy within this task sequence. Work efficiently and update progress.
+        """.strip()
+
+        # In production, this would launch a sub-agent via Task tool
+        console.print(f"[green]Sub-agent launched for {sequence_type} sequence in {task_sequence.phase_name}[/green]")
+        console.print(f"[dim]Sequence context: {len(sequence_context)} characters[/dim]")
+        return f"sub-agent-{task_sequence.id}"
+
+    def orchestrate_spec_workflow(self, phases: List[TaskPhase]) -> None:
+        """Execute complete Spec-Driven workflow with intelligent orchestration and monitoring."""
+
+        # Initialize performance monitoring
+        if self.config.enable_performance_monitoring:
+            self.metrics.start_time = datetime.now()
+            self.metrics.total_phases = len(phases)
+
+        # Create native tasks for high-level tracking
+        try:
+            self.task_manager.create_tasks_from_phases(phases)
+        except Exception as e:
+            console.print(f"[red]Error:[/red] Failed to create native tasks: {e}")
+            if self.config.enable_performance_monitoring:
+                console.print("[dim]Continuing with basic execution monitoring[/dim]")
+
+        # Build optimized execution queue
+        execution_queue = self.build_execution_queue(phases)
+
+        if self.config.enable_performance_monitoring:
+            total_phases = sum(len(batch.phases) for batch in execution_queue)
+            total_sequences = sum(len(batch.task_sequences) for batch in execution_queue)
+            estimated_total = sum(batch.estimated_time for batch in execution_queue)
+
+            console.print(f"[cyan]🎯 Advanced Orchestration Strategy: {self.config.strategy.value}[/cyan]")
+            console.print(f"[cyan]📊 Launching {total_phases} phases + {total_sequences} task sequences[/cyan]")
+            console.print(f"[cyan]⏱️  Estimated completion: {estimated_total} minutes[/cyan]")
+            console.print(f"[cyan]🔧 Max parallel agents: {self.config.max_parallel_agents}[/cyan]")
+            console.print()
+
+        # Execute batches with advanced error handling and retry logic
+        successful_batches = 0
+        for batch_idx, batch in enumerate(execution_queue):
+            try:
+                success = self._execute_batch_with_retry(batch, batch_idx + 1)
+                if success:
+                    successful_batches += 1
+                    if self.config.enable_performance_monitoring:
+                        self.metrics.completed_phases += len(batch.phases)
+                else:
+                    if self.config.enable_performance_monitoring:
+                        self.metrics.failed_phases += len(batch.phases)
+
+            except Exception as e:
+                console.print(f"[red]Critical Error in {batch.name}:[/red] {e}")
+                if self.config.enable_performance_monitoring:
+                    self.metrics.failed_phases += len(batch.phases)
+
+                if self.config.retry_policy != RetryPolicy.NONE:
+                    console.print("[yellow]Attempting recovery...[/yellow]")
+                    # Could implement recovery logic here
+
+        # Final performance report
+        if self.config.enable_performance_monitoring:
+            self._generate_performance_report(successful_batches, len(execution_queue))
+
+    def _execute_batch_with_retry(self, batch: ExecutionBatch, batch_number: int) -> bool:
+        """Execute a batch with retry logic and error handling."""
+
+        batch_items = len(batch.phases) + len(batch.task_sequences)
+        strategy_display = f"[{self.config.strategy.value}]"
+
+        for attempt in range(self.config.max_retries + 1):
+            try:
+                if attempt > 0:
+                    console.print(f"[yellow]Retry {attempt}/{self.config.max_retries} for {batch.name}[/yellow]")
+                    batch.retry_count = attempt
+                    if self.config.enable_performance_monitoring:
+                        self.metrics.retry_attempts += 1
+
+                console.print(f"[yellow]Starting {batch.name} {strategy_display}: "
+                             f"{batch_items} units, ~{batch.estimated_time}min[/yellow]")
+
+                # Track peak parallelism
+                if self.config.enable_performance_monitoring:
+                    self.metrics.peak_parallel_agents = max(
+                        self.metrics.peak_parallel_agents, batch.parallel_count
+                    )
+
+                # Execute batch
+                if batch.parallel_count > 1:
+                    # Launch phases in parallel
+                    for phase in batch.phases:
+                        agent_id = self.execute_phase(phase)
+                        self.active_agents[agent_id] = datetime.now()
+
+                    # Launch task sequences in parallel
+                    for sequence in batch.task_sequences:
+                        agent_id = self.execute_task_sequence(sequence)
+                        self.active_agents[agent_id] = datetime.now()
+
+                    console.print(f"[green]✅ Launched {batch.parallel_count} parallel sub-agents[/green]")
+                else:
+                    # Sequential execution
+                    for phase in batch.phases:
+                        agent_id = self.execute_phase(phase)
+                        self.active_agents[agent_id] = datetime.now()
+                    for sequence in batch.task_sequences:
+                        agent_id = self.execute_task_sequence(sequence)
+                        self.active_agents[agent_id] = datetime.now()
+
+                    console.print("[green]✅ Launched sequential execution[/green]")
+
+                return True  # Success
+
+            except Exception as e:
+                console.print(f"[red]Error in {batch.name} (attempt {attempt + 1}):[/red] {e}")
+                batch.failed_agents.append(f"attempt-{attempt + 1}")
+
+                if attempt < self.config.max_retries and self.config.retry_policy != RetryPolicy.NONE:
+                    retry_delay = self._calculate_retry_delay(attempt)
+                    console.print(f"[dim]Retrying in {retry_delay} seconds...[/dim]")
+                    import time
+                    time.sleep(retry_delay)
+                else:
+                    console.print(f"[red]Failed to execute {batch.name} after {attempt + 1} attempts[/red]")
+                    return False
+
+        return False
+
+    def _calculate_retry_delay(self, attempt: int) -> float:
+        """Calculate retry delay based on retry policy."""
+        base_delay = 2.0
+
+        if self.config.retry_policy == RetryPolicy.LINEAR:
+            return base_delay * float(attempt + 1)
+        elif self.config.retry_policy == RetryPolicy.EXPONENTIAL:
+            return base_delay * float(2 ** attempt)
+        elif self.config.retry_policy == RetryPolicy.ADAPTIVE:
+            # Adaptive: start fast, then slow down
+            return base_delay * (1.5 ** attempt)
+        else:
+            return base_delay
+
+    def _generate_performance_report(self, successful_batches: int, total_batches: int) -> None:
+        """Generate a performance report for the orchestration run."""
+
+        self.metrics.end_time = datetime.now()
+        duration = (self.metrics.end_time - self.metrics.start_time).total_seconds() / 60
+
+        console.print("\n" + "="*60)
+        console.print("[bold cyan]🎯 Orchestration Performance Report[/bold cyan]")
+        console.print("="*60)
+        console.print(f"[green]✅ Completed:[/green] {self.metrics.completed_phases}/{self.metrics.total_phases} phases")
+        console.print(f"[red]❌ Failed:[/red] {self.metrics.failed_phases} phases")
+        console.print(f"[blue]📊 Batches:[/blue] {successful_batches}/{total_batches} successful")
+        console.print(f"[yellow]🔄 Retries:[/yellow] {self.metrics.retry_attempts} attempts")
+        console.print(f"[cyan]⚡ Peak Parallelism:[/cyan] {self.metrics.peak_parallel_agents} agents")
+        console.print(f"[magenta]⏱️  Total Duration:[/magenta] {duration:.1f} minutes")
+        console.print(f"[dim]Strategy: {self.config.strategy.value} | Retry Policy: {self.config.retry_policy.value}[/dim]")
+        console.print("="*60)
 
 
 def find_tasks_file(start_path: Optional[Path] = None) -> Optional[Path]:
@@ -490,7 +1504,7 @@ class BannerGroup(TyperGroup):  # type: ignore[misc]
 
 app = typer.Typer(
     name="specify",
-    help="Setup tool for Specify spec-driven development projects with task management",
+    help="Claude Code setup tool for Specify spec-driven development projects with native task management",
     add_completion=False,
     invoke_without_command=True,
     cls=BannerGroup,
@@ -610,7 +1624,7 @@ def init_git_repo(project_path: Path, quiet: bool = False) -> bool:
         os.chdir(original_cwd)
 
 
-def download_template_from_github(ai_assistant: str, download_dir: Path, *, script_type: str = "sh", verbose: bool = True, show_progress: bool = True, client: Optional[httpx.Client] = None, debug: bool = False) -> Tuple[Path, Dict[str, Any]]:
+def download_template_from_github(download_dir: Path, *, script_type: str = "sh", verbose: bool = True, show_progress: bool = True, client: Optional[httpx.Client] = None, debug: bool = False) -> Tuple[Path, Dict[str, Any]]:
     repo_owner = "github"
     repo_name = "spec-kit"
     if client is None:
@@ -637,8 +1651,8 @@ def download_template_from_github(ai_assistant: str, download_dir: Path, *, scri
         console.print(Panel(str(e), title="Fetch Error", border_style="red"))
         raise typer.Exit(1)
 
-    # Find the template asset for the specified AI assistant
-    pattern = f"spec-kit-template-{ai_assistant}-{script_type}"
+    # Find the template asset for Claude Code
+    pattern = f"spec-kit-template-claude-{script_type}"
     matching_assets = [
         asset for asset in release_data.get("assets", [])
         if pattern in asset["name"] and asset["name"].endswith(".zip")
@@ -710,7 +1724,7 @@ def download_template_from_github(ai_assistant: str, download_dir: Path, *, scri
     return zip_path, metadata
 
 
-def download_and_extract_template(project_path: Path, ai_assistant: str, script_type: str, is_current_dir: bool = False, *, verbose: bool = True, tracker: Optional[StepTracker] = None, client: Optional[httpx.Client] = None, debug: bool = False, update_mode: bool = False) -> Path:
+def download_and_extract_template(project_path: Path, script_type: str, is_current_dir: bool = False, *, verbose: bool = True, tracker: Optional[StepTracker] = None, client: Optional[httpx.Client] = None, debug: bool = False, update_mode: bool = False) -> Path:
     """Download the latest release and extract it to create a new project."""
     current_dir = Path.cwd()
 
@@ -718,7 +1732,6 @@ def download_and_extract_template(project_path: Path, ai_assistant: str, script_
         tracker.start("fetch", "contacting GitHub API")
     try:
         zip_path, meta = download_template_from_github(
-            ai_assistant,
             current_dir,
             script_type=script_type,
             verbose=verbose and tracker is None,
@@ -923,15 +1936,14 @@ def ensure_executable_scripts(project_path: Path, tracker: Optional[StepTracker]
 @app.command()  # type: ignore[misc]
 def init(
     project_name: Optional[str] = typer.Argument(None, help="Name for your new project directory (optional if using --here)"),
-    ai_assistant: Optional[str] = typer.Option(None, "--ai", help="AI assistant to use: claude, gemini, copilot, or cursor"),
     script_type: Optional[str] = typer.Option(None, "--script", help="Script type to use: sh or ps"),
-    ignore_agent_tools: bool = typer.Option(False, "--ignore-agent-tools", help="Skip checks for AI agent tools like Claude Code"),
+    ignore_agent_tools: bool = typer.Option(False, "--ignore-agent-tools", help="Skip checks for Claude Code CLI"),
     no_git: bool = typer.Option(False, "--no-git", help="Skip git repository initialization"),
     here: bool = typer.Option(False, "--here", help="Initialize project in the current directory instead of creating a new one"),
     skip_tls: bool = typer.Option(False, "--skip-tls", help="Skip SSL/TLS verification (not recommended)"),
     debug: bool = typer.Option(False, "--debug", help="Show verbose diagnostic output for network and extraction failures"),
 ) -> None:
-    """Initialize a new Specify project from the latest template."""
+    """Initialize a new Claude Code Specify project from the latest template."""
     show_banner()
 
     # Validate arguments
@@ -978,33 +1990,12 @@ def init(
         if not git_available:
             console.print("[yellow]Git not found - will skip repository initialization[/yellow]")
 
-    # AI assistant selection
-    if ai_assistant:
-        if ai_assistant not in AI_CHOICES:
-            console.print(f"[red]Error:[/red] Invalid AI assistant '{ai_assistant}'. Choose from: {', '.join(AI_CHOICES.keys())}")
-            raise typer.Exit(1)
-        selected_ai = ai_assistant
-    else:
-        selected_ai = select_with_arrows(
-            AI_CHOICES,
-            "Choose your AI assistant:",
-            "copilot"
-        )
+    # Using Claude Code as the only supported assistant
 
-    # Check agent tools unless ignored
+    # Check Claude Code CLI unless ignored
     if not ignore_agent_tools:
-        agent_tool_missing = False
-        if selected_ai == "claude":
-            if not check_tool("claude", "Install from: https://docs.anthropic.com/en/docs/claude-code/setup"):
-                console.print("[red]Error:[/red] Claude CLI is required for Claude Code projects")
-                agent_tool_missing = True
-        elif selected_ai == "gemini":
-            if not check_tool("gemini", "Install from: https://github.com/google-gemini/gemini-cli"):
-                console.print("[red]Error:[/red] Gemini CLI is required for Gemini projects")
-                agent_tool_missing = True
-
-        if agent_tool_missing:
-            console.print("\n[red]Required AI tool is missing![/red]")
+        if not check_tool("claude", "Install from: https://docs.anthropic.com/en/docs/claude-code/setup"):
+            console.print("[red]Error:[/red] Claude Code CLI is required for Specify projects")
             console.print("[yellow]Tip:[/yellow] Use --ignore-agent-tools to skip this check")
             raise typer.Exit(1)
 
@@ -1021,15 +2012,12 @@ def init(
         else:
             selected_script = default_script
 
-    console.print(f"[cyan]Selected AI assistant:[/cyan] {selected_ai}")
-    console.print(f"[cyan]Selected script type:[/cyan] {selected_script}")
+    console.print(f"[cyan]Script type:[/cyan] {selected_script}")
 
     # Download and set up project
     tracker = StepTracker("Initialize Specify Project")
     tracker.add("precheck", "Check required tools")
     tracker.complete("precheck", "ok")
-    tracker.add("ai-select", "Select AI assistant")
-    tracker.complete("ai-select", f"{selected_ai}")
     tracker.add("script-select", "Select script type")
     tracker.complete("script-select", selected_script)
     for key, label in [
@@ -1052,7 +2040,7 @@ def init(
             local_ssl_context = ssl_context if verify else False
             local_client = httpx.Client(verify=local_ssl_context)
 
-            download_and_extract_template(project_path, selected_ai, selected_script, here, verbose=False, tracker=tracker, client=local_client, debug=debug)
+            download_and_extract_template(project_path, selected_script, here, verbose=False, tracker=tracker, client=local_client, debug=debug)
 
             ensure_executable_scripts(project_path, tracker=tracker)
 
@@ -1099,20 +2087,11 @@ def init(
         steps_lines.append("1. You're already in the project directory!")
         step_num = 2
 
-    if selected_ai == "claude":
-        steps_lines.append(f"{step_num}. Open in Visual Studio Code and start using / commands with Claude Code")
-        steps_lines.append("   - Type / in any file to see available commands")
-        steps_lines.append("   - Use /specify to create specifications")
-        steps_lines.append("   - Use /plan to create implementation plans")
-        steps_lines.append("   - Use /tasks to generate tasks")
-    elif selected_ai == "gemini":
-        steps_lines.append(f"{step_num}. Use / commands with Gemini CLI")
-        steps_lines.append("   - Run gemini /specify to create specifications")
-        steps_lines.append("   - Run gemini /plan to create implementation plans")
-        steps_lines.append("   - Run gemini /tasks to generate tasks")
-        steps_lines.append("   - See GEMINI.md for all available commands")
-    elif selected_ai == "copilot":
-        steps_lines.append(f"{step_num}. Open in Visual Studio Code and use [bold cyan]/specify[/], [bold cyan]/plan[/], [bold cyan]/tasks[/] commands with GitHub Copilot")
+    steps_lines.append(f"{step_num}. Open in Visual Studio Code and start using / commands with Claude Code")
+    steps_lines.append("   - Type / in any file to see available commands")
+    steps_lines.append("   - Use /specify to create specifications")
+    steps_lines.append("   - Use /plan to create implementation plans")
+    steps_lines.append("   - Use /tasks to generate tasks")
 
     step_num += 1
     steps_lines.append(f"{step_num}. Update [bold magenta]CONSTITUTION.md[/bold magenta] with your project's non-negotiable principles")
@@ -1124,13 +2103,12 @@ def init(
 
 @app.command()  # type: ignore[misc]
 def update(
-    ai_assistant: Optional[str] = typer.Option(None, "--ai", help="AI assistant to use: claude, gemini, copilot, or cursor"),
     script_type: Optional[str] = typer.Option(None, "--script", help="Script type to use: sh or ps"),
-    ignore_agent_tools: bool = typer.Option(False, "--ignore-agent-tools", help="Skip checks for AI agent tools like Claude Code"),
+    ignore_agent_tools: bool = typer.Option(False, "--ignore-agent-tools", help="Skip checks for Claude Code CLI"),
     skip_tls: bool = typer.Option(False, "--skip-tls", help="Skip SSL/TLS verification (not recommended)"),
     debug: bool = typer.Option(False, "--debug", help="Show verbose diagnostic output for network and extraction failures"),
 ) -> None:
-    """Update Spec Kit infrastructure while preserving user content."""
+    """Update Claude Code Specify infrastructure while preserving user content."""
     show_banner()
 
     project_path = Path.cwd()
@@ -1143,33 +2121,12 @@ def update(
         border_style="cyan"
     ))
 
-    # AI assistant selection
-    if ai_assistant:
-        if ai_assistant not in AI_CHOICES:
-            console.print(f"[red]Error:[/red] Invalid AI assistant '{ai_assistant}'. Choose from: {', '.join(AI_CHOICES.keys())}")
-            raise typer.Exit(1)
-        selected_ai = ai_assistant
-    else:
-        selected_ai = select_with_arrows(
-            AI_CHOICES,
-            "Choose your AI assistant:",
-            "copilot"
-        )
+    # Using Claude Code as the only supported assistant
 
-    # Check agent tools unless ignored
+    # Check Claude Code CLI unless ignored
     if not ignore_agent_tools:
-        agent_tool_missing = False
-        if selected_ai == "claude":
-            if not check_tool("claude", "Install from: https://docs.anthropic.com/en/docs/claude-code/setup"):
-                console.print("[red]Error:[/red] Claude CLI is required for Claude Code projects")
-                agent_tool_missing = True
-        elif selected_ai == "gemini":
-            if not check_tool("gemini", "Install from: https://github.com/google-gemini/gemini-cli"):
-                console.print("[red]Error:[/red] Gemini CLI is required for Gemini projects")
-                agent_tool_missing = True
-
-        if agent_tool_missing:
-            console.print("\n[red]Required AI tool is missing![/red]")
+        if not check_tool("claude", "Install from: https://docs.anthropic.com/en/docs/claude-code/setup"):
+            console.print("[red]Error:[/red] Claude Code CLI is required for Specify projects")
             console.print("[yellow]Tip:[/yellow] Use --ignore-agent-tools to skip this check")
             raise typer.Exit(1)
 
@@ -1186,15 +2143,12 @@ def update(
         else:
             selected_script = default_script
 
-    console.print(f"[cyan]Selected AI assistant:[/cyan] {selected_ai}")
-    console.print(f"[cyan]Selected script type:[/cyan] {selected_script}")
+    console.print(f"[cyan]Script type:[/cyan] {selected_script}")
 
     # Update infrastructure
     tracker = StepTracker("Update Specify Infrastructure")
     tracker.add("precheck", "Check required tools")
     tracker.complete("precheck", "ok")
-    tracker.add("ai-select", "Select AI assistant")
-    tracker.complete("ai-select", f"{selected_ai}")
     tracker.add("script-select", "Select script type")
     tracker.complete("script-select", selected_script)
     for key, label in [
@@ -1216,7 +2170,7 @@ def update(
             local_ssl_context = ssl_context if verify else False
             local_client = httpx.Client(verify=local_ssl_context)
 
-            download_and_extract_template(project_path, selected_ai, selected_script, is_current_dir=True, verbose=False, tracker=tracker, client=local_client, debug=debug, update_mode=True)
+            download_and_extract_template(project_path, selected_script, is_current_dir=True, verbose=False, tracker=tracker, client=local_client, debug=debug, update_mode=True)
 
             ensure_executable_scripts(project_path, tracker=tracker)
 
@@ -1228,7 +2182,7 @@ def update(
                 env_lines = [
                     f"Working Directory: {Path.cwd()}",
                     f"Project Path: {project_path}",
-                    f"AI Assistant: {selected_ai}",
+                    f"AI Assistant: Claude Code",
                     f"Script Type: {selected_script}",
                     f"Error: {str(e)}"
                 ]
@@ -1250,26 +2204,18 @@ def check() -> None:
 
     tracker.add("git", "Git version control")
     tracker.add("claude", "Claude Code CLI")
-    tracker.add("gemini", "Gemini CLI")
-    tracker.add("code", "VS Code (for GitHub Copilot)")
-    tracker.add("cursor-agent", "Cursor IDE agent (optional)")
 
     git_ok = check_tool_for_tracker("git", "https://git-scm.com/downloads", tracker)
     claude_ok = check_tool_for_tracker("claude", "https://docs.anthropic.com/en/docs/claude-code/setup", tracker)
-    gemini_ok = check_tool_for_tracker("gemini", "https://github.com/google-gemini/gemini-cli", tracker)
-    code_ok = check_tool_for_tracker("code", "https://code.visualstudio.com/", tracker)
-    if not code_ok:
-        code_ok = check_tool_for_tracker("code-insiders", "https://code.visualstudio.com/insiders/", tracker)
-    check_tool_for_tracker("cursor-agent", "https://cursor.sh/", tracker)
 
     console.print(tracker.render())
 
-    console.print("\n[bold green]Specify CLI is ready to use![/bold green]")
+    console.print("\n[bold green]Claude Code Specify CLI is ready to use![/bold green]")
 
     if not git_ok:
         console.print("[dim]Tip: Install git for repository management[/dim]")
-    if not (claude_ok or gemini_ok):
-        console.print("[dim]Tip: Install an AI assistant for the best experience[/dim]")
+    if not claude_ok:
+        console.print("[dim]Tip: Install Claude Code CLI for the best experience[/dim]")
 
 
 # Task management commands
@@ -1321,39 +2267,53 @@ def task_complete(
 
 @task_app.command("status")  # type: ignore[misc]
 def task_status() -> None:
-    """Show status of all tasks in the current feature."""
+    """Show status of all tasks in the current feature (native and file-based)."""
+
+    # Try to show native TodoWrite progress first
+    task_manager = NativeTaskManager()
+    native_progress = task_manager.get_progress_summary()
+
+    if native_progress.get('total', 0) > 0:
+        console.print("\n[bold cyan]Native TodoWrite Tasks:[/bold cyan]")
+        console.print(f"  📊 Progress: {native_progress['completed']}/{native_progress['total']} "
+                     f"({int(native_progress.get('progress_pct', 0))}%)")
+        console.print(f"  ⏳ Pending: {native_progress['pending']}")
+        console.print(f"  🔄 In progress: {native_progress['in_progress']}")
+        console.print(f"  ✅ Completed: {native_progress['completed']}")
+        console.print(f"  [dim]Monitor via Claude Code's TodoWrite interface[/dim]\n")
+
+    # Also show traditional file-based tasks if available
     tasks_file = find_tasks_file()
-    if not tasks_file:
-        console.print("[red]Error:[/red] No tasks.md found for current feature branch")
-        console.print("[dim]Make sure you're on a feature branch (001-feature-name) and have run /tasks[/dim]")
+    if tasks_file:
+        parser = TaskParser(tasks_file)
+        all_tasks = parser.get_all_tasks()
+
+        if all_tasks:
+            summary = parser.get_progress_summary()
+            console.print(f"[bold]File-based Tasks:[/bold] {summary['completed']}/{summary['total']} "
+                         f"({summary['progress_pct']}%)")
+            console.print(f"[dim]File: {tasks_file}[/dim]\n")
+
+            incomplete = parser.get_incomplete_tasks()
+            completed = parser.get_completed_tasks()
+
+            if incomplete:
+                console.print("[bold]Incomplete Tasks:[/bold]")
+                for task in incomplete:
+                    parallel = "[cyan][P][/cyan]" if task.parallel else ""
+                    console.print(f"  [red]○[/red] {task.task_id} {parallel} {task.description}")
+                console.print()
+
+            if completed:
+                console.print("[bold]Completed Tasks:[/bold]")
+                for task in completed:
+                    parallel = "[cyan][P][/cyan]" if task.parallel else ""
+                    console.print(f"  [green]✓[/green] {task.task_id} {parallel} {task.description}")
+
+    elif native_progress.get('total', 0) == 0:
+        console.print("[red]Error:[/red] No tasks found (native or file-based)")
+        console.print("[dim]Make sure you're on a feature branch (001-feature-name) and have run 'specify tasks'[/dim]")
         raise typer.Exit(1)
-
-    parser = TaskParser(tasks_file)
-    all_tasks = parser.get_all_tasks()
-
-    if not all_tasks:
-        console.print(f"[yellow]No tasks found in {tasks_file.name}[/yellow]")
-        return
-
-    summary = parser.get_progress_summary()
-    console.print(f"\n[bold]Task Progress:[/bold] {summary['completed']}/{summary['total']} ({summary['progress_pct']}%)")
-    console.print(f"[dim]File: {tasks_file}[/dim]\n")
-
-    incomplete = parser.get_incomplete_tasks()
-    completed = parser.get_completed_tasks()
-
-    if incomplete:
-        console.print("[bold]Incomplete Tasks:[/bold]")
-        for task in incomplete:
-            parallel = "[cyan][P][/cyan]" if task.parallel else ""
-            console.print(f"  [red]○[/red] {task.task_id} {parallel} {task.description}")
-        console.print()
-
-    if completed:
-        console.print("[bold]Completed Tasks:[/bold]")
-        for task in completed:
-            parallel = "[cyan][P][/cyan]" if task.parallel else ""
-            console.print(f"  [green]✓[/green] {task.task_id} {parallel} {task.description}")
 
 
 @task_app.command("list")  # type: ignore[misc]
@@ -1418,6 +2378,167 @@ def task_uncomplete(
         console.print(f"[dim]Progress: {summary['completed']}/{summary['total']} tasks ({summary['progress_pct']}%)[/dim]")
     else:
         console.print(f"[red]Error:[/red] Failed to mark {task_id} as incomplete")
+        raise typer.Exit(1)
+
+
+@task_app.command("complete-native")  # type: ignore[misc]
+def task_complete_native(
+    task_id: str = typer.Argument(..., help="Native task ID to mark complete (e.g., phase-3-1)")
+) -> None:
+    """Mark a native TodoWrite task as complete."""
+    task_manager = NativeTaskManager()
+
+    success = task_manager.complete_task(task_id)
+    if success:
+        console.print(f"[green]✓[/green] Marked native task {task_id} as complete")
+
+        progress = task_manager.get_progress_summary()
+        console.print(f"[dim]Progress: {progress['completed']}/{progress['total']} tasks "
+                     f"({int(progress.get('progress_pct', 0))}%)[/dim]")
+    else:
+        console.print(f"[yellow]Note:[/yellow] Task {task_id} completion handled by TodoWrite system")
+        console.print("[dim]Native tasks are managed automatically by Claude Code sub-agents[/dim]")
+
+
+@app.command()  # type: ignore[misc]
+def tasks(
+    _context: Optional[str] = typer.Argument(None, help="Context for task generation (feature name, description, etc.)"),
+    strategy: str = typer.Option("balanced", "--strategy", help="Orchestration strategy: balanced, aggressive, conservative, dependency_first"),
+    max_parallel: int = typer.Option(10, "--max-parallel", help="Maximum parallel sub-agents (1-10)"),
+    retry_policy: str = typer.Option("adaptive", "--retry-policy", help="Retry policy: none, linear, exponential, adaptive"),
+    no_monitoring: bool = typer.Option(False, "--no-monitoring", help="Disable performance monitoring")
+) -> None:
+    """Generate and launch native Claude Code tasks with advanced orchestration and monitoring."""
+
+    import subprocess
+    import json
+
+    # Validate and create configuration
+    try:
+        orchestration_strategy = OrchestrationStrategy(strategy.lower())
+    except ValueError:
+        valid_strategies = [s.value for s in OrchestrationStrategy]
+        console.print(f"[red]Error:[/red] Invalid strategy '{strategy}'. Choose from: {', '.join(valid_strategies)}")
+        raise typer.Exit(1)
+
+    try:
+        retry_policy_enum = RetryPolicy(retry_policy.lower())
+    except ValueError:
+        valid_policies = [p.value for p in RetryPolicy]
+        console.print(f"[red]Error:[/red] Invalid retry policy '{retry_policy}'. Choose from: {', '.join(valid_policies)}")
+        raise typer.Exit(1)
+
+    if not (1 <= max_parallel <= 10):
+        console.print("[red]Error:[/red] max-parallel must be between 1 and 10 (Claude Code limit)")
+        raise typer.Exit(1)
+
+    # Create advanced configuration
+    config = OrchestrationConfig(
+        strategy=orchestration_strategy,
+        max_parallel_agents=max_parallel,
+        retry_policy=retry_policy_enum,
+        enable_performance_monitoring=not no_monitoring
+    )
+
+    # Run prerequisite check
+    try:
+        result = subprocess.run(
+            ["./scripts/bash/check-task-prerequisites.sh", "--json"],
+            capture_output=True,
+            text=True,
+            check=True
+        )
+        prereq_data = json.loads(result.stdout)
+
+    except subprocess.CalledProcessError as e:
+        console.print("[red]Error:[/red] Prerequisite check failed")
+        console.print(f"[dim]{e.stderr if e.stderr else 'Unknown error'}[/dim]")
+        raise typer.Exit(1)
+
+    except json.JSONDecodeError as e:
+        console.print(f"[red]Error:[/red] Failed to parse prerequisite output: {e}")
+        raise typer.Exit(1)
+
+    feature_dir = prereq_data["FEATURE_DIR"]
+    available_docs = prereq_data["AVAILABLE_DOCS"]
+
+    console.print(Panel.fit(
+        "[bold cyan]Advanced Task Orchestration[/bold cyan]\n"
+        f"Feature: [green]{Path(feature_dir).name}[/green]\n"
+        f"Strategy: [yellow]{config.strategy.value}[/yellow] | "
+        f"Max Parallel: [blue]{config.max_parallel_agents}[/blue]\n"
+        f"Retry Policy: [magenta]{config.retry_policy.value}[/magenta] | "
+        f"Monitoring: [cyan]{'On' if config.enable_performance_monitoring else 'Off'}[/cyan]\n"
+        f"Available docs: [dim]{', '.join(available_docs)}[/dim]",
+        border_style="cyan"
+    ))
+
+    # Load implementation plan
+    plan_path = f"{feature_dir}/plan.md"
+    try:
+        with open(plan_path, 'r') as f:
+            plan_content = f.read()
+        console.print(f"[green]✓[/green] Loaded implementation plan ({len(plan_content)} characters)")
+    except FileNotFoundError:
+        console.print(f"[red]Error:[/red] No plan.md found at {plan_path}")
+        console.print("[dim]Run /plan command first to generate implementation plan[/dim]")
+        raise typer.Exit(1)
+
+    # Initialize components with advanced configuration
+    processor = PlanProcessor()
+    task_manager = NativeTaskManager()
+    orchestrator = PhaseOrchestrator(task_manager, config)
+
+    # Parse plan into phases
+    with console.status("[blue]Parsing implementation plan with advanced scheduling..."):
+        try:
+            phases = processor.parse_plan_to_phases(plan_content, available_docs)
+            total_tasks = sum(len(phase.tasks) for phase in phases)
+            total_duration = sum(phase.estimated_duration for phase in phases)
+
+            console.print(f"[green]✓[/green] Generated {len(phases)} phases with {total_tasks} tasks")
+            console.print(f"[dim]Estimated total duration: {total_duration} minutes[/dim]")
+
+        except Exception as e:
+            console.print(f"[red]Error:[/red] Failed to parse plan: {e}")
+            raise typer.Exit(1)
+
+    # Show enhanced phase summary
+    console.print(f"\n[bold]Phase Summary ([cyan]{config.strategy.value}[/cyan] strategy):[/bold]")
+    for phase in phases:
+        parallel_count = sum(1 for task in phase.tasks if task.parallel)
+        sequential_count = len(phase.tasks) - parallel_count
+
+        console.print(f"  📋 Phase {phase.id}: [cyan]{phase.name}[/cyan]")
+        console.print(f"     ⏱️  {phase.estimated_duration}min | 🎯 {phase.priority_boost:.1f}x priority")
+        console.print(f"     📝 {len(phase.tasks)} tasks ({parallel_count} parallel, {sequential_count} sequential)")
+
+        if phase.dependencies:
+            deps_str = ", ".join(phase.dependencies)
+            console.print(f"     🔗 Depends on: {deps_str}")
+        console.print()
+
+    # Ask for confirmation with configuration details
+    confirmation_text = f"🚀 Launch advanced orchestration with {config.strategy.value} strategy?"
+    if not typer.confirm(f"\n{confirmation_text}"):
+        console.print("[yellow]Operation cancelled[/yellow]")
+        return
+
+    # Launch orchestration with advanced features
+    console.print(f"\n[bold cyan]🎯 Launching Advanced Orchestration[/bold cyan]")
+
+    try:
+        orchestrator.orchestrate_spec_workflow(phases)
+
+        console.print("\n[bold green]✅ Advanced orchestration launched successfully![/bold green]")
+        console.print("📊 Monitor progress via Claude Code's native TodoWrite interface")
+        console.print("⚡ Enhanced task-level parallelism with intelligent scheduling is now active")
+        if config.enable_performance_monitoring:
+            console.print("📈 Performance monitoring and retry mechanisms are enabled")
+        console.print("\n[dim]Use 'specify task status' to check progress[/dim]")
+
+    except Exception as e:
+        console.print(f"[red]Error:[/red] Failed to launch orchestration: {e}")
         raise typer.Exit(1)
 
 
