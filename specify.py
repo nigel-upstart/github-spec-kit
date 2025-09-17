@@ -40,7 +40,6 @@ from typing import Optional, Tuple, List, Dict, Any, Union, Callable
 from datetime import datetime
 from dataclasses import dataclass, field
 from abc import ABC, abstractmethod
-from enum import Enum
 
 import typer  # type: ignore[import-not-found]
 import httpx  # type: ignore[import-not-found]
@@ -65,20 +64,7 @@ client = httpx.Client(verify=ssl_context)
 # Constants - Claude Code Only
 SCRIPT_TYPE_CHOICES = {"sh": "POSIX Shell (bash/zsh)", "ps": "PowerShell"}
 
-# Configuration enums and settings
-class OrchestrationStrategy(Enum):
-    """Different orchestration strategies for task execution."""
-    BALANCED = "balanced"  # Balance between speed and resource usage
-    AGGRESSIVE = "aggressive"  # Maximize parallelism
-    CONSERVATIVE = "conservative"  # Minimize resource usage
-    DEPENDENCY_FIRST = "dependency_first"  # Prioritize dependency resolution
-
-class RetryPolicy(Enum):
-    """Retry policies for failed sub-agents."""
-    NONE = "none"  # No retries
-    LINEAR = "linear"  # Linear backoff
-    EXPONENTIAL = "exponential"  # Exponential backoff
-    ADAPTIVE = "adaptive"  # Adaptive based on failure type
+# Configuration settings
 
 # Claude CLI local installation path after migrate-installer
 CLAUDE_LOCAL_PATH = Path.home() / ".claude" / "local" / "claude"
@@ -314,11 +300,8 @@ class TaskSequence:
 @dataclass
 class OrchestrationConfig:
     """Configuration for task orchestration behavior."""
-    strategy: OrchestrationStrategy = OrchestrationStrategy.BALANCED
     max_parallel_agents: int = 10  # Claude Code limit
     max_batch_duration: int = 90  # minutes
-    retry_policy: RetryPolicy = RetryPolicy.ADAPTIVE
-    max_retries: int = 3
     enable_performance_monitoring: bool = True
     enable_smart_scheduling: bool = True
     priority_boost_factor: float = 0.3  # How much earlier phases get boosted
@@ -331,8 +314,6 @@ class ExecutionBatch:
     task_sequences: List[TaskSequence]  # NEW: parallel task sequences within phases
     estimated_time: int
     parallel_count: int = 1  # renamed from parallel_phases
-    retry_count: int = field(default=0)  # Track retry attempts
-    failed_agents: List[str] = field(default_factory=list)  # Track failed sub-agents
 
 
 class TaskDurationEstimator:
@@ -825,7 +806,6 @@ class PerformanceMetrics:
     total_phases: int = 0
     completed_phases: int = 0
     failed_phases: int = 0
-    retry_attempts: int = 0
     average_phase_duration: float = 0.0
     peak_parallel_agents: int = 0
 
@@ -884,9 +864,7 @@ class PhaseOrchestrator:
                 phases=batch_phases,
                 task_sequences=task_sequences,
                 estimated_time=max_batch_time,
-                parallel_count=optimal_parallel,
-                retry_count=0,
-                failed_agents=[]
+                parallel_count=optimal_parallel
             ))
 
             # Mark phases as completed
@@ -961,98 +939,61 @@ class PhaseOrchestrator:
         return sequences
 
     def _sort_phases_by_strategy(self, phases: List[TaskPhase]) -> List[TaskPhase]:
-        """Sort phases based on orchestration strategy and dependencies."""
+        """Sort phases based on dependencies with balanced approach."""
 
         # First apply topological sort for dependencies
         dependency_sorted = self._sort_phases_by_dependencies(phases)
 
-        # Then apply strategy-specific sorting within dependency groups
-        if self.config.strategy == OrchestrationStrategy.AGGRESSIVE:
-            # Prioritize parallel-heavy phases
-            return sorted(dependency_sorted,
-                         key=lambda p: (len(p.dependencies), -sum(1 for t in p.tasks if t.parallel)))
+        # Balance duration and parallelism
+        def balanced_score(phase: TaskPhase) -> float:
+            parallel_ratio = sum(1 for t in phase.tasks if t.parallel) / len(phase.tasks)
+            duration_factor = 1.0 / (phase.estimated_duration + 1)  # Avoid division by zero
+            return parallel_ratio * duration_factor * phase.priority_boost
 
-        elif self.config.strategy == OrchestrationStrategy.CONSERVATIVE:
-            # Prioritize shorter phases
-            return sorted(dependency_sorted,
-                         key=lambda p: (len(p.dependencies), p.estimated_duration))
-
-        elif self.config.strategy == OrchestrationStrategy.DEPENDENCY_FIRST:
-            # Already sorted by dependencies
-            return dependency_sorted
-
-        else:  # BALANCED (default)
-            # Balance duration and parallelism
-            def balanced_score(phase: TaskPhase) -> float:
-                parallel_ratio = sum(1 for t in phase.tasks if t.parallel) / len(phase.tasks)
-                duration_factor = 1.0 / (phase.estimated_duration + 1)  # Avoid division by zero
-                return parallel_ratio * duration_factor * phase.priority_boost
-
-            return sorted(dependency_sorted,
-                         key=lambda p: (len(p.dependencies), -balanced_score(p)))
+        return sorted(dependency_sorted,
+                     key=lambda p: (len(p.dependencies), -balanced_score(p)))
 
     def _create_smart_batch(self, ready_phases: List[TaskPhase]) -> Tuple[List[TaskPhase], int]:
-        """Create an optimally-sized batch based on configuration strategy."""
+        """Create an optimally-sized batch using balanced approach."""
 
-        if self.config.strategy == OrchestrationStrategy.AGGRESSIVE:
-            # Include as many phases as possible
-            max_phases = min(len(ready_phases), self.config.max_parallel_agents // 2)
-            batch_phases = ready_phases[:max_phases]
+        # Consider batch duration limit
+        batch_phases: List[TaskPhase] = []
+        total_time = 0
 
-        elif self.config.strategy == OrchestrationStrategy.CONSERVATIVE:
-            # Conservative approach - fewer phases per batch
-            max_phases = min(len(ready_phases), 2)
-            batch_phases = ready_phases[:max_phases]
+        for phase in ready_phases:
+            if (total_time + phase.estimated_duration <= self.config.max_batch_duration
+                and len(batch_phases) < 3):
+                batch_phases.append(phase)
+                total_time = max(total_time, phase.estimated_duration)  # Parallel execution
+            else:
+                break
 
-        else:  # BALANCED or DEPENDENCY_FIRST
-            # Consider batch duration limit
-            batch_phases = []
-            total_time = 0
-
-            for phase in ready_phases:
-                if (total_time + phase.estimated_duration <= self.config.max_batch_duration
-                    and len(batch_phases) < 3):
-                    batch_phases.append(phase)
-                    total_time = max(total_time, phase.estimated_duration)  # Parallel execution
-                else:
-                    break
-
-            # Ensure we have at least one phase
-            if not batch_phases and ready_phases:
-                batch_phases = [ready_phases[0]]
-                total_time = ready_phases[0].estimated_duration
+        # Ensure we have at least one phase
+        if not batch_phases and ready_phases:
+            batch_phases = [ready_phases[0]]
+            total_time = ready_phases[0].estimated_duration
 
         max_batch_time = max((p.estimated_duration for p in batch_phases), default=0)
         return batch_phases, max_batch_time
 
     def _calculate_optimal_parallel_count(self, num_phases: int, num_sequences: int,
                                         batch_duration: int) -> int:
-        """Calculate optimal number of parallel agents based on strategy and resources."""
+        """Calculate optimal number of parallel agents based on resources and duration."""
 
         total_units = num_phases + num_sequences
 
-        if self.config.strategy == OrchestrationStrategy.AGGRESSIVE:
-            # Use maximum allowed parallelism
-            return min(total_units, self.config.max_parallel_agents)
+        # Scale based on batch duration - longer batches get more parallel agents
+        if batch_duration > 60:  # Long batches
+            parallel_bonus = 2
+        elif batch_duration > 30:  # Medium batches
+            parallel_bonus = 1
+        else:  # Short batches
+            parallel_bonus = 0
 
-        elif self.config.strategy == OrchestrationStrategy.CONSERVATIVE:
-            # Conservative parallelism to avoid resource contention
-            conservative_limit = max(1, self.config.max_parallel_agents // 2)
-            return min(total_units, conservative_limit)
-
-        else:  # BALANCED or DEPENDENCY_FIRST
-            # Scale based on batch duration - longer batches get more parallel agents
-            if batch_duration > 60:  # Long batches
-                parallel_bonus = 2
-            elif batch_duration > 30:  # Medium batches
-                parallel_bonus = 1
-            else:  # Short batches
-                parallel_bonus = 0
-
-            optimal = min(total_units,
-                         min(self.config.max_parallel_agents,
-                             max(1, total_units // 2 + parallel_bonus)))
-            return optimal
+        optimal = min(total_units,
+                     min(self.config.max_parallel_agents,
+                         max(1, total_units // 2 + parallel_bonus)))
+        return optimal
 
     def execute_phase(self, phase: TaskPhase) -> str:
         """Launch sub-agent for entire phase execution."""
@@ -1148,7 +1089,7 @@ You have full autonomy within this task sequence. Work efficiently and update pr
             total_sequences = sum(len(batch.task_sequences) for batch in execution_queue)
             estimated_total = sum(batch.estimated_time for batch in execution_queue)
 
-            console.print(f"[cyan]🎯 Advanced Orchestration Strategy: {self.config.strategy.value}[/cyan]")
+            console.print(f"[cyan]🎯 Balanced Orchestration[/cyan]")
             console.print(f"[cyan]📊 Launching {total_phases} phases + {total_sequences} task sequences[/cyan]")
             console.print(f"[cyan]⏱️  Estimated completion: {estimated_total} minutes[/cyan]")
             console.print(f"[cyan]🔧 Max parallel agents: {self.config.max_parallel_agents}[/cyan]")
@@ -1172,91 +1113,56 @@ You have full autonomy within this task sequence. Work efficiently and update pr
                 if self.config.enable_performance_monitoring:
                     self.metrics.failed_phases += len(batch.phases)
 
-                if self.config.retry_policy != RetryPolicy.NONE:
-                    console.print("[yellow]Attempting recovery...[/yellow]")
-                    # Could implement recovery logic here
 
         # Final performance report
         if self.config.enable_performance_monitoring:
             self._generate_performance_report(successful_batches, len(execution_queue))
 
     def _execute_batch_with_retry(self, batch: ExecutionBatch, batch_number: int) -> bool:
-        """Execute a batch with retry logic and error handling."""
+        """Execute a batch with error handling."""
 
         batch_items = len(batch.phases) + len(batch.task_sequences)
-        strategy_display = f"[{self.config.strategy.value}]"
 
-        for attempt in range(self.config.max_retries + 1):
-            try:
-                if attempt > 0:
-                    console.print(f"[yellow]Retry {attempt}/{self.config.max_retries} for {batch.name}[/yellow]")
-                    batch.retry_count = attempt
-                    if self.config.enable_performance_monitoring:
-                        self.metrics.retry_attempts += 1
+        try:
+            console.print(f"[yellow]Starting {batch.name}: "
+                         f"{batch_items} units, ~{batch.estimated_time}min[/yellow]")
 
-                console.print(f"[yellow]Starting {batch.name} {strategy_display}: "
-                             f"{batch_items} units, ~{batch.estimated_time}min[/yellow]")
+            # Track peak parallelism
+            if self.config.enable_performance_monitoring:
+                self.metrics.peak_parallel_agents = max(
+                    self.metrics.peak_parallel_agents, batch.parallel_count
+                )
 
-                # Track peak parallelism
-                if self.config.enable_performance_monitoring:
-                    self.metrics.peak_parallel_agents = max(
-                        self.metrics.peak_parallel_agents, batch.parallel_count
-                    )
+            # Execute batch
+            if batch.parallel_count > 1:
+                # Launch phases in parallel
+                for phase in batch.phases:
+                    agent_id = self.execute_phase(phase)
+                    self.active_agents[agent_id] = datetime.now()
 
-                # Execute batch
-                if batch.parallel_count > 1:
-                    # Launch phases in parallel
-                    for phase in batch.phases:
-                        agent_id = self.execute_phase(phase)
-                        self.active_agents[agent_id] = datetime.now()
+                # Launch task sequences in parallel
+                for sequence in batch.task_sequences:
+                    agent_id = self.execute_task_sequence(sequence)
+                    self.active_agents[agent_id] = datetime.now()
 
-                    # Launch task sequences in parallel
-                    for sequence in batch.task_sequences:
-                        agent_id = self.execute_task_sequence(sequence)
-                        self.active_agents[agent_id] = datetime.now()
+                console.print(f"[green]✅ Launched {batch.parallel_count} parallel sub-agents[/green]")
+            else:
+                # Sequential execution
+                for phase in batch.phases:
+                    agent_id = self.execute_phase(phase)
+                    self.active_agents[agent_id] = datetime.now()
+                for sequence in batch.task_sequences:
+                    agent_id = self.execute_task_sequence(sequence)
+                    self.active_agents[agent_id] = datetime.now()
 
-                    console.print(f"[green]✅ Launched {batch.parallel_count} parallel sub-agents[/green]")
-                else:
-                    # Sequential execution
-                    for phase in batch.phases:
-                        agent_id = self.execute_phase(phase)
-                        self.active_agents[agent_id] = datetime.now()
-                    for sequence in batch.task_sequences:
-                        agent_id = self.execute_task_sequence(sequence)
-                        self.active_agents[agent_id] = datetime.now()
+                console.print("[green]✅ Launched sequential execution[/green]")
 
-                    console.print("[green]✅ Launched sequential execution[/green]")
+            return True  # Success
 
-                return True  # Success
+        except Exception as e:
+            console.print(f"[red]Error in {batch.name}:[/red] {e}")
+            return False
 
-            except Exception as e:
-                console.print(f"[red]Error in {batch.name} (attempt {attempt + 1}):[/red] {e}")
-                batch.failed_agents.append(f"attempt-{attempt + 1}")
-
-                if attempt < self.config.max_retries and self.config.retry_policy != RetryPolicy.NONE:
-                    retry_delay = self._calculate_retry_delay(attempt)
-                    console.print(f"[dim]Retrying in {retry_delay} seconds...[/dim]")
-                    import time
-                    time.sleep(retry_delay)
-                else:
-                    console.print(f"[red]Failed to execute {batch.name} after {attempt + 1} attempts[/red]")
-                    return False
-
-        return False
-
-    def _calculate_retry_delay(self, attempt: int) -> float:
-        """Calculate retry delay based on retry policy."""
-        base_delay = 2.0
-
-        if self.config.retry_policy == RetryPolicy.LINEAR:
-            return base_delay * float(attempt + 1)
-        elif self.config.retry_policy == RetryPolicy.EXPONENTIAL:
-            return base_delay * float(2 ** attempt)
-        elif self.config.retry_policy == RetryPolicy.ADAPTIVE:
-            # Adaptive: start fast, then slow down
-            return base_delay * (1.5 ** attempt)
-        else:
-            return base_delay
 
     def _generate_performance_report(self, successful_batches: int, total_batches: int) -> None:
         """Generate a performance report for the orchestration run."""
@@ -1270,10 +1176,8 @@ You have full autonomy within this task sequence. Work efficiently and update pr
         console.print(f"[green]✅ Completed:[/green] {self.metrics.completed_phases}/{self.metrics.total_phases} phases")
         console.print(f"[red]❌ Failed:[/red] {self.metrics.failed_phases} phases")
         console.print(f"[blue]📊 Batches:[/blue] {successful_batches}/{total_batches} successful")
-        console.print(f"[yellow]🔄 Retries:[/yellow] {self.metrics.retry_attempts} attempts")
         console.print(f"[cyan]⚡ Peak Parallelism:[/cyan] {self.metrics.peak_parallel_agents} agents")
         console.print(f"[magenta]⏱️  Total Duration:[/magenta] {duration:.1f} minutes")
-        console.print(f"[dim]Strategy: {self.config.strategy.value} | Retry Policy: {self.config.retry_policy.value}[/dim]")
         console.print("="*60)
 
 
@@ -2403,40 +2307,22 @@ def task_complete_native(
 @app.command()  # type: ignore[misc]
 def tasks(
     _context: Optional[str] = typer.Argument(None, help="Context for task generation (feature name, description, etc.)"),
-    strategy: str = typer.Option("balanced", "--strategy", help="Orchestration strategy: balanced, aggressive, conservative, dependency_first"),
     max_parallel: int = typer.Option(10, "--max-parallel", help="Maximum parallel sub-agents (1-10)"),
-    retry_policy: str = typer.Option("adaptive", "--retry-policy", help="Retry policy: none, linear, exponential, adaptive"),
     no_monitoring: bool = typer.Option(False, "--no-monitoring", help="Disable performance monitoring")
 ) -> None:
-    """Generate and launch native Claude Code tasks with advanced orchestration and monitoring."""
+    """Generate and launch native Claude Code tasks with balanced orchestration and monitoring."""
 
     import subprocess
     import json
 
-    # Validate and create configuration
-    try:
-        orchestration_strategy = OrchestrationStrategy(strategy.lower())
-    except ValueError:
-        valid_strategies = [s.value for s in OrchestrationStrategy]
-        console.print(f"[red]Error:[/red] Invalid strategy '{strategy}'. Choose from: {', '.join(valid_strategies)}")
-        raise typer.Exit(1)
-
-    try:
-        retry_policy_enum = RetryPolicy(retry_policy.lower())
-    except ValueError:
-        valid_policies = [p.value for p in RetryPolicy]
-        console.print(f"[red]Error:[/red] Invalid retry policy '{retry_policy}'. Choose from: {', '.join(valid_policies)}")
-        raise typer.Exit(1)
-
+    # Validate configuration
     if not (1 <= max_parallel <= 10):
         console.print("[red]Error:[/red] max-parallel must be between 1 and 10 (Claude Code limit)")
         raise typer.Exit(1)
 
-    # Create advanced configuration
+    # Create orchestration configuration
     config = OrchestrationConfig(
-        strategy=orchestration_strategy,
         max_parallel_agents=max_parallel,
-        retry_policy=retry_policy_enum,
         enable_performance_monitoring=not no_monitoring
     )
 
@@ -2463,11 +2349,9 @@ def tasks(
     available_docs = prereq_data["AVAILABLE_DOCS"]
 
     console.print(Panel.fit(
-        "[bold cyan]Advanced Task Orchestration[/bold cyan]\n"
+        "[bold cyan]Balanced Task Orchestration[/bold cyan]\n"
         f"Feature: [green]{Path(feature_dir).name}[/green]\n"
-        f"Strategy: [yellow]{config.strategy.value}[/yellow] | "
-        f"Max Parallel: [blue]{config.max_parallel_agents}[/blue]\n"
-        f"Retry Policy: [magenta]{config.retry_policy.value}[/magenta] | "
+        f"Max Parallel: [blue]{config.max_parallel_agents}[/blue] | "
         f"Monitoring: [cyan]{'On' if config.enable_performance_monitoring else 'Off'}[/cyan]\n"
         f"Available docs: [dim]{', '.join(available_docs)}[/dim]",
         border_style="cyan"
@@ -2504,7 +2388,7 @@ def tasks(
             raise typer.Exit(1)
 
     # Show enhanced phase summary
-    console.print(f"\n[bold]Phase Summary ([cyan]{config.strategy.value}[/cyan] strategy):[/bold]")
+    console.print(f"\n[bold]Phase Summary (balanced strategy):[/bold]")
     for phase in phases:
         parallel_count = sum(1 for task in phase.tasks if task.parallel)
         sequential_count = len(phase.tasks) - parallel_count
@@ -2519,7 +2403,7 @@ def tasks(
         console.print()
 
     # Ask for confirmation with configuration details
-    confirmation_text = f"🚀 Launch advanced orchestration with {config.strategy.value} strategy?"
+    confirmation_text = f"🚀 Launch balanced orchestration?"
     if not typer.confirm(f"\n{confirmation_text}"):
         console.print("[yellow]Operation cancelled[/yellow]")
         return
@@ -2530,11 +2414,11 @@ def tasks(
     try:
         orchestrator.orchestrate_spec_workflow(phases)
 
-        console.print("\n[bold green]✅ Advanced orchestration launched successfully![/bold green]")
+        console.print("\n[bold green]✅ Balanced orchestration launched successfully![/bold green]")
         console.print("📊 Monitor progress via Claude Code's native TodoWrite interface")
-        console.print("⚡ Enhanced task-level parallelism with intelligent scheduling is now active")
+        console.print("⚡ Task-level parallelism with intelligent scheduling is now active")
         if config.enable_performance_monitoring:
-            console.print("📈 Performance monitoring and retry mechanisms are enabled")
+            console.print("📈 Performance monitoring is enabled")
         console.print("\n[dim]Use 'specify task status' to check progress[/dim]")
 
     except Exception as e:
