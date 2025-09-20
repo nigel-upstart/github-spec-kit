@@ -1818,11 +1818,16 @@ def init(
     steps_lines.append(f"{step_num}. Open in Visual Studio Code and start using / commands with Claude Code")
     steps_lines.append("   - Type / in any file to see available commands")
     steps_lines.append("   - Use /specify to create specifications")
-    steps_lines.append("   - Use /plan to create implementation plans")
+    steps_lines.append("   - Use Claude Code plan mode to create implementation plans (see templates/README-planning.md)")
     steps_lines.append("   - Use /tasks to generate tasks")
 
     step_num += 1
     steps_lines.append(f"{step_num}. Update [bold magenta]CONSTITUTION.md[/bold magenta] with your project's non-negotiable principles")
+
+    step_num += 1
+    steps_lines.append(f"{step_num}. Review documentation in [bold cyan]templates/[/bold cyan] directory:")
+    steps_lines.append("   - [bold cyan]templates/README-planning.md[/bold cyan]: Claude Code plan mode workflow")
+    steps_lines.append("   - [bold cyan]templates/prompts/plan-prompt.md[/bold cyan]: Planning prompt templates")
 
     steps_panel = Panel("\n".join(steps_lines), title="Next steps", border_style="cyan", padding=(1,2))
     console.print()
@@ -2009,7 +2014,7 @@ def tasks(
         console.print(f"[green]✓[/green] Loaded implementation plan ({len(plan_content)} characters)")
     except FileNotFoundError:
         console.print(f"[red]Error:[/red] No plan.md found at {plan_path}")
-        console.print("[dim]Run /plan command first to generate implementation plan[/dim]")
+        console.print("[dim]Use Claude Code plan mode to generate implementation plan (see templates/README-planning.md for instructions)[/dim]")
         raise typer.Exit(1)
 
     # Initialize components with advanced configuration
