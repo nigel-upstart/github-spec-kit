@@ -11,19 +11,18 @@
 # ]
 # ///
 """
-Specify CLI - Claude Code setup tool for Specify projects with native task management
+Specify CLI - Claude Code setup tool for Specify projects
 
 Usage:
     uv run specify.py init <project-name>
     uv run specify.py update
-    uv run specify.py task complete T001
-    uv run specify.py task status
+    uv run specify.py check
 
 Or install globally:
     uv tool install specify.py
     specify init <project-name>
     specify update
-    specify task complete T001
+    specify check
 
 Requires Claude Code for full functionality.
 """
@@ -103,145 +102,6 @@ PRESERVE_PATHS = {
     "go.mod",
 }
 
-# ===== TASK TRACKING CLASSES =====
-
-class TaskEntry:
-    """Represents a single task entry from tasks.md."""
-
-    def __init__(self, task_id: str, description: str, completed: bool = False, parallel: bool = False, line_number: int = 0) -> None:
-        self.task_id = task_id
-        self.description = description
-        self.completed = completed
-        self.parallel = parallel  # marked with [P]
-        self.line_number = line_number
-        self.original_line = ""
-
-    def __repr__(self) -> str:
-        return f"TaskEntry(id={self.task_id}, completed={self.completed}, desc='{self.description[:50]}...')"
-
-
-class TaskParser:
-    """Parser for tasks.md files following Spec Kit format."""
-
-    # Regex to match task lines like: - [ ] T001 [P] Description
-    TASK_PATTERN = re.compile(r'^- \[([x ])\] (T\d{3})(\s*\[P\])?\s*(.+)$', re.IGNORECASE)
-
-    def __init__(self, tasks_file: Path) -> None:
-        self.tasks_file = tasks_file
-        self.tasks: Dict[str, TaskEntry] = {}
-        self.file_lines: List[str] = []
-
-        if self.tasks_file.exists():
-            self._parse_file()
-
-    def _parse_file(self) -> None:
-        """Parse the tasks.md file and extract task entries."""
-        with open(self.tasks_file, 'r', encoding='utf-8') as f:
-            self.file_lines = f.readlines()
-
-        for line_num, line in enumerate(self.file_lines):
-            stripped = line.strip()
-            match = self.TASK_PATTERN.match(stripped)
-
-            if match:
-                checkbox, task_id, parallel_marker, description = match.groups()
-                completed = checkbox.lower() == 'x'
-                parallel = parallel_marker is not None
-
-                task = TaskEntry(
-                    task_id=task_id,
-                    description=description.strip(),
-                    completed=completed,
-                    parallel=parallel,
-                    line_number=line_num
-                )
-                task.original_line = line
-                self.tasks[task_id] = task
-
-    def get_task(self, task_id: str) -> Optional[TaskEntry]:
-        """Get a task by its ID (e.g., 'T001')."""
-        return self.tasks.get(task_id.upper())
-
-    def get_all_tasks(self) -> List[TaskEntry]:
-        """Get all tasks sorted by task ID."""
-        return sorted(self.tasks.values(), key=lambda t: t.task_id)
-
-    def get_incomplete_tasks(self) -> List[TaskEntry]:
-        """Get all incomplete tasks."""
-        return [task for task in self.tasks.values() if not task.completed]
-
-    def get_completed_tasks(self) -> List[TaskEntry]:
-        """Get all completed tasks."""
-        return [task for task in self.tasks.values() if task.completed]
-
-    def mark_complete(self, task_id: str, commit_message: Optional[str] = None) -> bool:
-        """Mark a task as complete and update the file."""
-        task = self.get_task(task_id)
-        if not task:
-            return False
-
-        if task.completed:
-            return True  # Already completed
-
-        # Update the task object
-        task.completed = True
-
-        # Update the file line
-        old_line = self.file_lines[task.line_number]
-        new_line = old_line.replace('- [ ]', '- [x]', 1)
-
-        # Add completion timestamp as a comment if not already present
-        if not re.search(r'# Completed:', new_line):
-            timestamp = datetime.now().strftime('%Y-%m-%d %H:%M')
-            new_line = new_line.rstrip() + f' # Completed: {timestamp}\n'
-
-        self.file_lines[task.line_number] = new_line
-
-        # Write the updated file
-        with open(self.tasks_file, 'w', encoding='utf-8') as f:
-            f.writelines(self.file_lines)
-
-        return True
-
-    def mark_incomplete(self, task_id: str) -> bool:
-        """Mark a task as incomplete and update the file."""
-        task = self.get_task(task_id)
-        if not task:
-            return False
-
-        if not task.completed:
-            return True  # Already incomplete
-
-        # Update the task object
-        task.completed = False
-
-        # Update the file line
-        old_line = self.file_lines[task.line_number]
-        new_line = old_line.replace('- [x]', '- [ ]', 1)
-
-        # Remove completion timestamp if present
-        new_line = re.sub(r'\s*# Completed:.*$', '\n', new_line)
-
-        self.file_lines[task.line_number] = new_line
-
-        # Write the updated file
-        with open(self.tasks_file, 'w', encoding='utf-8') as f:
-            f.writelines(self.file_lines)
-
-        return True
-
-    def get_progress_summary(self) -> Dict[str, Union[int, float]]:
-        """Get a summary of task progress."""
-        total = len(self.tasks)
-        completed = len(self.get_completed_tasks())
-        incomplete = total - completed
-
-        return {
-            'total': total,
-            'completed': completed,
-            'incomplete': incomplete,
-            'progress_pct': round((completed / total * 100) if total > 0 else 0, 1)
-        }
 
 
 def should_update_path(file_path: str, update_mode: bool) -> bool:
@@ -1181,42 +1041,6 @@ You have full autonomy within this task sequence. Work efficiently and update pr
         console.print("="*60)
 
 
-def find_tasks_file(start_path: Optional[Path] = None) -> Optional[Path]:
-    """Find the tasks.md file for the current feature branch."""
-    if start_path is None:
-        start_path = Path.cwd()
-
-    try:
-        # Use the same logic as the bash scripts
-        result = subprocess.run(
-            ['git', 'rev-parse', '--show-toplevel'],
-            capture_output=True,
-            text=True,
-            check=True,
-            cwd=start_path
-        )
-        repo_root = Path(result.stdout.strip())
-
-        result = subprocess.run(
-            ['git', 'rev-parse', '--abbrev-ref', 'HEAD'],
-            capture_output=True,
-            text=True,
-            check=True,
-            cwd=start_path
-        )
-        current_branch = result.stdout.strip()
-
-        # Check if it's a feature branch (###-feature-name format)
-        if not re.match(r'^\d{3}-', current_branch):
-            return None
-
-        feature_dir = repo_root / 'specs' / current_branch
-        tasks_file = feature_dir / 'tasks.md'
-
-        return tasks_file if tasks_file.exists() else None
-
-    except (subprocess.CalledProcessError, FileNotFoundError):
-        return None
 
 
 # ===== UI CLASSES AND FUNCTIONS =====
@@ -1408,7 +1232,7 @@ class BannerGroup(TyperGroup):  # type: ignore[misc]
 
 app = typer.Typer(
     name="specify",
-    help="Claude Code setup tool for Specify spec-driven development projects with native task management",
+    help="Claude Code setup tool for Specify spec-driven development projects",
     add_completion=False,
     invoke_without_command=True,
     cls=BannerGroup,
@@ -2122,186 +1946,6 @@ def check() -> None:
         console.print("[dim]Tip: Install Claude Code CLI for the best experience[/dim]")
 
 
-# Task management commands
-task_app = typer.Typer(help="Manage tasks in the current feature's tasks.md file")
-app.add_typer(task_app, name="task")
-
-
-@task_app.command("complete")  # type: ignore[misc]
-def task_complete(
-    task_id: str = typer.Argument(..., help="Task ID to mark complete (e.g., T001)"),
-    message: Optional[str] = typer.Option(None, "--message", "-m", help="Optional commit message describing what was completed")
-) -> None:
-    """Mark a task as complete in the tasks.md file."""
-    tasks_file = find_tasks_file()
-    if not tasks_file:
-        console.print("[red]Error:[/red] No tasks.md found for current feature branch")
-        console.print("[dim]Make sure you're on a feature branch (001-feature-name) and have run /tasks[/dim]")
-        raise typer.Exit(1)
-
-    parser = TaskParser(tasks_file)
-    task = parser.get_task(task_id)
-
-    if not task:
-        console.print(f"[red]Error:[/red] Task '{task_id}' not found in {tasks_file.name}")
-        console.print("\n[dim]Available tasks:[/dim]")
-        for t in parser.get_all_tasks():
-            status = "✓" if t.completed else "○"
-            parallel = "[P]" if t.parallel else ""
-            console.print(f"  {status} {t.task_id} {parallel} {t.description[:60]}...")
-        raise typer.Exit(1)
-
-    if task.completed:
-        console.print(f"[yellow]Task {task_id} is already completed[/yellow]")
-        return
-
-    success = parser.mark_complete(task_id, message)
-    if success:
-        console.print(f"[green]✓[/green] Marked {task_id} as complete: [dim]{task.description}[/dim]")
-
-        summary = parser.get_progress_summary()
-        console.print(f"[dim]Progress: {summary['completed']}/{summary['total']} tasks ({summary['progress_pct']}%)[/dim]")
-
-        if message:
-            console.print(f"\n[dim]Consider committing with:[/dim] git commit -m \"{message}\"")
-    else:
-        console.print(f"[red]Error:[/red] Failed to mark {task_id} as complete")
-        raise typer.Exit(1)
-
-
-@task_app.command("status")  # type: ignore[misc]
-def task_status() -> None:
-    """Show status of all tasks in the current feature (native and file-based)."""
-
-    # Try to show native TodoWrite progress first
-    task_manager = NativeTaskManager()
-    native_progress = task_manager.get_progress_summary()
-
-    if native_progress.get('total', 0) > 0:
-        console.print("\n[bold cyan]Native TodoWrite Tasks:[/bold cyan]")
-        console.print(f"  📊 Progress: {native_progress['completed']}/{native_progress['total']} "
-                     f"({int(native_progress.get('progress_pct', 0))}%)")
-        console.print(f"  ⏳ Pending: {native_progress['pending']}")
-        console.print(f"  🔄 In progress: {native_progress['in_progress']}")
-        console.print(f"  ✅ Completed: {native_progress['completed']}")
-        console.print(f"  [dim]Monitor via Claude Code's TodoWrite interface[/dim]\n")
-
-    # Also show traditional file-based tasks if available
-    tasks_file = find_tasks_file()
-    if tasks_file:
-        parser = TaskParser(tasks_file)
-        all_tasks = parser.get_all_tasks()
-
-        if all_tasks:
-            summary = parser.get_progress_summary()
-            console.print(f"[bold]File-based Tasks:[/bold] {summary['completed']}/{summary['total']} "
-                         f"({summary['progress_pct']}%)")
-            console.print(f"[dim]File: {tasks_file}[/dim]\n")
-
-            incomplete = parser.get_incomplete_tasks()
-            completed = parser.get_completed_tasks()
-
-            if incomplete:
-                console.print("[bold]Incomplete Tasks:[/bold]")
-                for task in incomplete:
-                    parallel = "[cyan][P][/cyan]" if task.parallel else ""
-                    console.print(f"  [red]○[/red] {task.task_id} {parallel} {task.description}")
-                console.print()
-
-            if completed:
-                console.print("[bold]Completed Tasks:[/bold]")
-                for task in completed:
-                    parallel = "[cyan][P][/cyan]" if task.parallel else ""
-                    console.print(f"  [green]✓[/green] {task.task_id} {parallel} {task.description}")
-
-    elif native_progress.get('total', 0) == 0:
-        console.print("[red]Error:[/red] No tasks found (native or file-based)")
-        console.print("[dim]Make sure you're on a feature branch (001-feature-name) and have run 'specify tasks'[/dim]")
-        raise typer.Exit(1)
-
-
-@task_app.command("list")  # type: ignore[misc]
-def task_list(
-    incomplete_only: bool = typer.Option(False, "--incomplete", "-i", help="Show only incomplete tasks")
-) -> None:
-    """List all tasks in the current feature."""
-    tasks_file = find_tasks_file()
-    if not tasks_file:
-        console.print("[red]Error:[/red] No tasks.md found for current feature branch")
-        console.print("[dim]Make sure you're on a feature branch (001-feature-name) and have run /tasks[/dim]")
-        raise typer.Exit(1)
-
-    parser = TaskParser(tasks_file)
-
-    if incomplete_only:
-        tasks_to_show = parser.get_incomplete_tasks()
-        console.print(f"\n[bold]Incomplete Tasks ({len(tasks_to_show)}):[/bold]")
-    else:
-        tasks_to_show = parser.get_all_tasks()
-        summary = parser.get_progress_summary()
-        console.print(f"\n[bold]All Tasks ({summary['completed']}/{summary['total']}):[/bold]")
-
-    if not tasks_to_show:
-        console.print("[dim]No tasks to show[/dim]")
-        return
-
-    console.print(f"[dim]File: {tasks_file}[/dim]\n")
-
-    for task in tasks_to_show:
-        status = "[green]✓[/green]" if task.completed else "[red]○[/red]"
-        parallel = "[cyan][P][/cyan]" if task.parallel else ""
-        console.print(f"  {status} {task.task_id} {parallel} {task.description}")
-
-
-@task_app.command("uncomplete")  # type: ignore[misc]
-def task_uncomplete(
-    task_id: str = typer.Argument(..., help="Task ID to mark incomplete (e.g., T001)")
-) -> None:
-    """Mark a task as incomplete in the tasks.md file."""
-    tasks_file = find_tasks_file()
-    if not tasks_file:
-        console.print("[red]Error:[/red] No tasks.md found for current feature branch")
-        raise typer.Exit(1)
-
-    parser = TaskParser(tasks_file)
-    task = parser.get_task(task_id)
-
-    if not task:
-        console.print(f"[red]Error:[/red] Task '{task_id}' not found")
-        raise typer.Exit(1)
-
-    if not task.completed:
-        console.print(f"[yellow]Task {task_id} is already incomplete[/yellow]")
-        return
-
-    success = parser.mark_incomplete(task_id)
-    if success:
-        console.print(f"[green]○[/green] Marked {task_id} as incomplete: [dim]{task.description}[/dim]")
-
-        summary = parser.get_progress_summary()
-        console.print(f"[dim]Progress: {summary['completed']}/{summary['total']} tasks ({summary['progress_pct']}%)[/dim]")
-    else:
-        console.print(f"[red]Error:[/red] Failed to mark {task_id} as incomplete")
-        raise typer.Exit(1)
-
-
-@task_app.command("complete-native")  # type: ignore[misc]
-def task_complete_native(
-    task_id: str = typer.Argument(..., help="Native task ID to mark complete (e.g., phase-3-1)")
-) -> None:
-    """Mark a native TodoWrite task as complete."""
-    task_manager = NativeTaskManager()
-
-    success = task_manager.complete_task(task_id)
-    if success:
-        console.print(f"[green]✓[/green] Marked native task {task_id} as complete")
-
-        progress = task_manager.get_progress_summary()
-        console.print(f"[dim]Progress: {progress['completed']}/{progress['total']} tasks "
-                     f"({int(progress.get('progress_pct', 0))}%)[/dim]")
-    else:
-        console.print(f"[yellow]Note:[/yellow] Task {task_id} completion handled by TodoWrite system")
-        console.print("[dim]Native tasks are managed automatically by Claude Code sub-agents[/dim]")
 
 
 @app.command()  # type: ignore[misc]
