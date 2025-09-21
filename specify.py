@@ -1836,6 +1836,7 @@ def init(
 
 @app.command()  # type: ignore[misc]
 def update(
+    path: Optional[str] = typer.Option(None, "--path", help="Path to the project directory to update (defaults to current directory)"),
     script_type: Optional[str] = typer.Option(None, "--script", help="Script type to use: sh or ps"),
     ignore_agent_tools: bool = typer.Option(False, "--ignore-agent-tools", help="Skip checks for Claude Code CLI"),
     skip_tls: bool = typer.Option(False, "--skip-tls", help="Skip SSL/TLS verification (not recommended)"),
@@ -1844,12 +1845,24 @@ def update(
     """Update Claude Code Specify infrastructure while preserving user content."""
     show_banner()
 
-    project_path = Path.cwd()
+    # Determine project path
+    if path:
+        project_path = Path(path).resolve()
+        if not project_path.exists():
+            console.print(f"[red]Error:[/red] Directory '{path}' does not exist")
+            raise typer.Exit(1)
+        if not project_path.is_dir():
+            console.print(f"[red]Error:[/red] '{path}' is not a directory")
+            raise typer.Exit(1)
+    else:
+        project_path = Path.cwd()
+
     project_name = project_path.name
 
     console.print(Panel.fit(
         "[bold cyan]Specify Project Update[/bold cyan]\n"
         f"Updating infrastructure in: [green]{project_name}[/green]\n"
+        f"[dim]Path: {project_path}[/dim]\n"
         "[dim]User content (CONSTITUTION.md, specs/, etc.) will be preserved[/dim]",
         border_style="cyan"
     ))
