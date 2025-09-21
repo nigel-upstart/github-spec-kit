@@ -1352,6 +1352,72 @@ def init_git_repo(project_path: Path, quiet: bool = False) -> bool:
         os.chdir(original_cwd)
 
 
+def is_spec_kit_source_repo() -> bool:
+    """Check if we're running from within the spec-kit source repository."""
+    current_dir = Path.cwd()
+
+    # Check for key files that indicate this is the spec-kit source repo
+    required_files = [
+        current_dir / "specify.py",
+        current_dir / "templates",
+        current_dir / "scripts"
+    ]
+
+    return all(path.exists() for path in required_files)
+
+
+def create_local_template_zip(download_dir: Path, script_type: str, verbose: bool = True) -> Tuple[Path, Dict[str, Any]]:
+    """Create a template ZIP from local files when running in source repo."""
+    current_dir = Path.cwd()
+
+    # Create a temporary ZIP file
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    filename = f"spec-kit-template-claude-{script_type}-local-{timestamp}.zip"
+    zip_path = download_dir / filename
+
+    if verbose:
+        console.print("[cyan]Using local template files (development mode)[/cyan]")
+
+    # Files and directories to include in the template
+    template_items = [
+        "templates",
+        "scripts",
+        "memory",
+        "CLAUDE.md"
+    ]
+
+    total_size = 0
+    with zipfile.ZipFile(zip_path, 'w', zipfile.ZIP_DEFLATED) as zip_ref:
+        for item_name in template_items:
+            item_path = current_dir / item_name
+            if not item_path.exists():
+                continue
+
+            if item_path.is_file():
+                zip_ref.write(item_path, item_name)
+                total_size += item_path.stat().st_size
+            elif item_path.is_dir():
+                for file_path in item_path.rglob('*'):
+                    if file_path.is_file():
+                        arcname = file_path.relative_to(current_dir)
+                        zip_ref.write(file_path, str(arcname))
+                        total_size += file_path.stat().st_size
+
+    if verbose:
+        console.print(f"[cyan]Created local template:[/cyan] {filename}")
+        console.print(f"[cyan]Size:[/cyan] {total_size:,} bytes")
+        console.print(f"[cyan]Source:[/cyan] {current_dir}")
+
+    metadata = {
+        "filename": filename,
+        "size": total_size,
+        "release": "local-development",
+        "asset_url": str(zip_path)
+    }
+
+    return zip_path, metadata
+
+
 def download_template_from_github(download_dir: Path, *, script_type: str = "sh", verbose: bool = True, show_progress: bool = True, client: Optional[httpx.Client] = None, debug: bool = False) -> Tuple[Path, Dict[str, Any]]:
     repo_owner = "github"
     repo_name = "spec-kit"
@@ -1456,28 +1522,52 @@ def download_and_extract_template(project_path: Path, script_type: str, is_curre
     """Download the latest release and extract it to create a new project."""
     current_dir = Path.cwd()
 
-    if tracker:
-        tracker.start("fetch", "contacting GitHub API")
-    try:
-        zip_path, meta = download_template_from_github(
-            current_dir,
-            script_type=script_type,
-            verbose=verbose and tracker is None,
-            show_progress=(tracker is None),
-            client=client,
-            debug=debug
-        )
+    # Check if we're running from the spec-kit source repository
+    use_local = is_spec_kit_source_repo()
+
+    if use_local:
         if tracker:
-            tracker.complete("fetch", f"release {meta['release']} ({meta['size']:,} bytes)")
-            tracker.add("download", "Download template")
-            tracker.complete("download", meta['filename'])
-    except Exception as e:
+            tracker.start("fetch", "using local source files")
+        try:
+            zip_path, meta = create_local_template_zip(
+                current_dir,
+                script_type=script_type,
+                verbose=verbose and tracker is None
+            )
+            if tracker:
+                tracker.complete("fetch", f"local template ({meta['size']:,} bytes)")
+                tracker.add("download", "Create local template")
+                tracker.complete("download", meta['filename'])
+        except Exception as e:
+            if tracker:
+                tracker.error("fetch", str(e))
+            else:
+                if verbose:
+                    console.print(f"[red]Error creating local template:[/red] {e}")
+            raise
+    else:
         if tracker:
-            tracker.error("fetch", str(e))
-        else:
-            if verbose:
-                console.print(f"[red]Error downloading template:[/red] {e}")
-        raise
+            tracker.start("fetch", "contacting GitHub API")
+        try:
+            zip_path, meta = download_template_from_github(
+                current_dir,
+                script_type=script_type,
+                verbose=verbose and tracker is None,
+                show_progress=(tracker is None),
+                client=client,
+                debug=debug
+            )
+            if tracker:
+                tracker.complete("fetch", f"release {meta['release']} ({meta['size']:,} bytes)")
+                tracker.add("download", "Download template")
+                tracker.complete("download", meta['filename'])
+        except Exception as e:
+            if tracker:
+                tracker.error("fetch", str(e))
+            else:
+                if verbose:
+                    console.print(f"[red]Error downloading template:[/red] {e}")
+            raise
 
     if tracker:
         tracker.add("extract", "Extract template")
